@@ -1,8 +1,6 @@
 Copasta
 
-A Windows desktop app that expands abbreviations into rich text (like PhraseExpress). Supports folders, Auto/Hotkey triggers, rich text paste, and a global floating phrase menu.
-
-Planned GitHub repository name: copasta-app
+A Windows desktop app that expands abbreviations into rich text. Supports folders, Auto/Hotkey triggers, rich text paste, and a global floating phrase menu.
 
 Features
 
