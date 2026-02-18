@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# App data & logs (user-specific, should not be in version control)
+phrases.json
+config.json
+*.log
+*.tmp
+
+# Build output
+dist/
+build/
+installer_output/
+*.egg-info/
+
+# PyInstaller
+*.spec.bak
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
