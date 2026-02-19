@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 
 # App data & logs (user-specific, should not be in version control)
+Phrases.json
 phrases.json
 config.json
 *.log
@@ -14,6 +15,7 @@ dist/
 dist-portable/
 build/
 installer_output/
+release/
 *.egg-info/
 
 # PyInstaller
