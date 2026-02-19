@@ -1,8 +1,8 @@
 Copasta
 
-A Windows desktop app for saving commonly used words, phrases or long messages, for easy pasting. Supports folders for phrase storage, abbreviations for automatic pasting, rich text paste, and a global floating phrase menu.
+A Windows desktop app that expands abbreviations into rich text. Supports folders, Auto/Hotkey triggers, rich text paste, and a global floating phrase menu.
 
-GitHub repository name: copasta-app
+GitHub: https://github.com/Levati-Wolfson/copasta-app
 
 Features
 
