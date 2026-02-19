@@ -1,0 +1,3 @@
+This file marks Copasta as a portable installation.
+Data (phrases.json, config.json) is stored in the same folder as Copasta.exe.
+Do not delete this file.

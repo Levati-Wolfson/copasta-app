@@ -7,12 +7,12 @@ APP_NAME = "Copasta"
 
 
 def _get_launcher_cmd():
-    """Command to run this app (pythonw + script path)."""
+    """Command to run this app (pythonw + script path + --minimized flag)."""
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")
     exe = sys.executable
     if exe.lower().endswith("python.exe"):
         exe = exe[:-10] + "pythonw.exe"
-    return '"%s" "%s"' % (exe, script)
+    return '"%s" "%s" --minimized' % (exe, script)
 
 
 def get_start_with_windows():

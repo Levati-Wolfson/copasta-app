@@ -11,6 +11,7 @@ config.json
 
 # Build output
 dist/
+dist-portable/
 build/
 installer_output/
 *.egg-info/

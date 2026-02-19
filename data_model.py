@@ -6,10 +6,16 @@ import uuid
 
 def _resolve_data_dir():
     """
-    Use a persistent per-user directory when running as a bundled executable.
-    In source/dev mode, keep using the project directory for convenience.
+    Resolve where phrases.json and config.json are stored.
+
+    - Dev (source): always next to the .py files.
+    - Installed (.exe, no 'portable' marker): %APPDATA%\\Copasta  (per-user, survives updates)
+    - Portable (.exe + 'portable' marker next to it): same folder as the .exe
     """
     if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(sys.executable)
+        if os.path.exists(os.path.join(exe_dir, "portable")):
+            return exe_dir
         appdata = os.getenv("APPDATA")
         base = appdata if appdata else os.path.expanduser("~")
         data_dir = os.path.join(base, "Copasta")

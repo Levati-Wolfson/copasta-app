@@ -33,6 +33,7 @@ def _setup_logging():
 
 def main():
     _setup_logging()
+    start_minimized = "--minimized" in sys.argv
     data = data_model.load_data()
 
     def get_data():
@@ -93,6 +94,8 @@ def main():
     )
     # Apply saved theme (dark mode) only after window is ready
     dashboard.root.after(100, lambda: gui.apply_theme(dashboard.root, get_settings))
+    if start_minimized:
+        dashboard.root.after(0, dashboard.hide)
 
     def open_settings():
         # Disable floating window hotkey while settings are open
