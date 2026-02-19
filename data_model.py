@@ -14,7 +14,12 @@ def _resolve_data_dir():
     """
     if getattr(sys, "frozen", False):
         exe_dir = os.path.dirname(sys.executable)
-        if os.path.exists(os.path.join(exe_dir, "portable")):
+        # Check next to the .exe (zip distribution) OR inside the PyInstaller bundle (_MEIPASS)
+        meipass = getattr(sys, "_MEIPASS", None)
+        is_portable = os.path.exists(os.path.join(exe_dir, "portable")) or (
+            meipass and os.path.exists(os.path.join(meipass, "portable"))
+        )
+        if is_portable:
             return exe_dir
         appdata = os.getenv("APPDATA")
         base = appdata if appdata else os.path.expanduser("~")
