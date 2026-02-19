@@ -6,32 +6,27 @@ import uuid
 
 def _resolve_data_dir():
     """
-    Resolve where phrases.json and config.json are stored.
+    Resolve where Phrases.json and config.json are stored.
 
-    - Dev (source): always next to the .py files.
-    - Installed (.exe, no 'portable' marker): %APPDATA%\\Copasta  (per-user, survives updates)
-    - Portable (.exe + 'portable' marker next to it): same folder as the .exe
+    - Bundled .exe: always next to the .exe (portable-only distribution).
+    - Dev (source): next to the .py files.
     """
     if getattr(sys, "frozen", False):
-        exe_dir = os.path.dirname(sys.executable)
-        # Check next to the .exe (zip distribution) OR inside the PyInstaller bundle (_MEIPASS)
-        meipass = getattr(sys, "_MEIPASS", None)
-        is_portable = os.path.exists(os.path.join(exe_dir, "portable")) or (
-            meipass and os.path.exists(os.path.join(meipass, "portable"))
-        )
-        if is_portable:
-            return exe_dir
-        appdata = os.getenv("APPDATA")
-        base = appdata if appdata else os.path.expanduser("~")
-        data_dir = os.path.join(base, "Copasta")
-        os.makedirs(data_dir, exist_ok=True)
-        return data_dir
+        return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
 
 _DATA_DIR = _resolve_data_dir()
-DATA_FILE = os.path.join(_DATA_DIR, "phrases.json")
+DATA_FILE = os.path.join(_DATA_DIR, "Phrases.json")
 CONFIG_FILE = os.path.join(_DATA_DIR, "config.json")
+
+# Migrate from old filename if needed (silent, one-time)
+_OLD_DATA_FILE = os.path.join(_DATA_DIR, "phrases.json")
+if not os.path.exists(DATA_FILE) and os.path.exists(_OLD_DATA_FILE):
+    try:
+        os.rename(_OLD_DATA_FILE, DATA_FILE)
+    except OSError:
+        pass
 
 # Default settings
 DEFAULT_SETTINGS = {

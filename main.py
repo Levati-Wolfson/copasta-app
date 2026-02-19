@@ -91,6 +91,7 @@ def main():
         save_settings=lambda s: data_model.save_data(data),
         on_close_callback=lambda: dashboard.hide(),
         on_settings_callback=None,
+        on_quit_callback=lambda: quit_app(),
     )
     # Apply saved theme (dark mode) only after window is ready
     dashboard.root.after(100, lambda: gui.apply_theme(dashboard.root, get_settings))

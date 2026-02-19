@@ -342,13 +342,14 @@ class PhraseDialog(tk.Toplevel):
 class MainWindow:
     """Main app window: left Treeview (folders/phrases), toolbar, right panel / add-edit."""
 
-    def __init__(self, get_data, save_data, get_settings=None, save_settings=None, on_close_callback=None, on_settings_callback=None):
+    def __init__(self, get_data, save_data, get_settings=None, save_settings=None, on_close_callback=None, on_settings_callback=None, on_quit_callback=None):
         self._get_data = get_data
         self._save_data = save_data
         self._get_settings = get_settings
         self._save_settings = save_settings
         self._on_close = on_close_callback
         self._on_settings = on_settings_callback
+        self._on_quit = on_quit_callback
 
         # Use ttkbootstrap Window with modern dark theme
         self.root = ttk.Window(themename="darkly")
@@ -383,7 +384,8 @@ class MainWindow:
         )
         file_menu.add_command(label="Settings...", command=self._open_settings)
         file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self._on_window_close)
+        file_menu.add_command(label="Minimize to tray", command=self._on_window_close)
+        file_menu.add_command(label="Quit", command=self._quit)
         file_menubutton.config(menu=file_menu)
         
         if self._on_settings:
@@ -424,9 +426,11 @@ class MainWindow:
         self._tree.bind("<<TreeviewSelect>>", self._on_tree_select)
         self._tree.bind("<Double-1>", self._on_tree_double)
         self._tree.bind("<Delete>", lambda e: self._delete())
+        self._tree.bind("<ButtonPress-1>", self._on_tree_click, add="+")
         self._tree.tag_configure("folder", font=("Segoe UI", 10, "bold"))
         self._tree.tag_configure("phrase", font=("Segoe UI", 10))
         self._setup_drag_drop()
+        self.root.bind("<Escape>", lambda e: self._deselect())
 
         # Right: phrase preview (manually styled for dark mode)
         right = ttk.Frame(paned, padding="8 0 0 0")
@@ -439,6 +443,9 @@ class MainWindow:
         self._preview_abbr_label.pack(anchor=tk.W, pady=(0, 2))
         self._preview_editor = RichTextEditor(right, height=20, show_toolbar=False, readonly=True)
         self._preview_editor.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        # Click anywhere on the right panel to deselect
+        for widget in (right, self._right_label, self._preview_sep, self._preview_abbr_label):
+            widget.bind("<ButtonPress-1>", lambda e: self._deselect())
 
     def _refresh_tree(self):
         # Preserve which folders were expanded (tree iids = our item ids)
@@ -480,7 +487,7 @@ class MainWindow:
         self._drop_mode = None  # "into" | "before" | "after"
         self._tree.tag_configure("drop_target_into", background="#cce0ff")
         # Thin line shown between items when dropping "between" (no row highlight)
-        self._drop_line = tk.Frame(self._tree.master, height=2, bg="#2a7fff", highlightthickness=0)
+        self._drop_line = tk.Frame(self._tree.master, height=2, bg="#ffffff", highlightthickness=0)
         self._tree.bind("<ButtonPress-1>", self._on_drag_start)
         self._tree.bind("<B1-Motion>", self._on_drag_motion)
         self._tree.bind("<ButtonRelease-1>", self._on_drag_end)
@@ -602,6 +609,14 @@ class MainWindow:
         self._refresh_tree()
         self._tree.selection_set(src_item.get("id"))
         self._drag_iid = None
+
+    def _deselect(self):
+        self._tree.selection_set([])
+
+    def _on_tree_click(self, event):
+        """Deselect when clicking on empty space in the tree."""
+        if not self._tree.identify_row(event.y):
+            self._deselect()
 
     def _get_selected_item_and_parent(self):
         sel = self._tree.selection()
@@ -794,6 +809,13 @@ class MainWindow:
         self._save_geometry()
         if self._on_close:
             self._on_close()
+        else:
+            self.root.destroy()
+
+    def _quit(self):
+        self._save_geometry()
+        if self._on_quit:
+            self._on_quit()
         else:
             self.root.destroy()
 
