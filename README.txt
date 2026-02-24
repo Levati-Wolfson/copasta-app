@@ -55,12 +55,12 @@ Phrase preview
   including the abbreviation (if any) and the formatted content.
 
 Persistence
-  All data (folders, phrases, settings) is stored in a single file: Phrases.json.
-
-Portable use
-  In the portable (zip) distribution, Phrases.json is stored in the same
-  folder as Copasta.exe. This means you can:
-    • Move the entire folder to another device and take all your phrases with you.
+  All data (folders, phrases, settings) is stored in a single file, Phrases.json,
+  kept in the same folder as Copasta.exe. Nothing is written to AppData or anywhere
+  else on the system.
+  This means you can:
+    • Move or copy the entire folder to another device and take all your phrases
+      with you.
     • Store the folder in Dropbox or OneDrive to sync phrases across devices
       automatically.
   Note: if you move the folder after enabling "Start with Windows", untick and
