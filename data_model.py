@@ -4,9 +4,10 @@ import os
 import sys
 import uuid
 
+
 def _resolve_data_dir():
     """
-    Resolve where Phrases.json and config.json are stored.
+    Resolve where Phrases.json is stored.
 
     - Bundled .exe: always next to the .exe (portable-only distribution).
     - Dev (source): next to the .py files.
@@ -18,7 +19,6 @@ def _resolve_data_dir():
 
 _DATA_DIR = _resolve_data_dir()
 DATA_FILE = os.path.join(_DATA_DIR, "Phrases.json")
-CONFIG_FILE = os.path.join(_DATA_DIR, "config.json")
 
 # Migrate from old filename if needed (silent, one-time)
 _OLD_DATA_FILE = os.path.join(_DATA_DIR, "phrases.json")
@@ -28,16 +28,12 @@ if not os.path.exists(DATA_FILE) and os.path.exists(_OLD_DATA_FILE):
     except OSError:
         pass
 
-# Default settings
 DEFAULT_SETTINGS = {
     "floating_menu_hotkey": "ctrl+shift+space",
-    "expansion_hotkey": "ctrl+alt+e",
     "floating_menu_position": "cursor",  # "cursor", "mouse", or "fixed"
     "floating_menu_x": 100,
     "floating_menu_y": 100,
-    "last_trigger_type": "Auto",
     "start_with_windows": False,
-    "dark_mode": False,
     "window_geometry": "750x500",
 }
 
@@ -67,10 +63,6 @@ def _ensure_phrase(item):
         item["name"] = ""
     if "trigger" not in item:
         item["trigger"] = ""
-    if "trigger_type" not in item:
-        item["trigger_type"] = "Auto"
-    if "hotkey" not in item:
-        item["hotkey"] = ""
     if "expansion_html" not in item:
         item["expansion_html"] = ""
     return item
@@ -110,8 +102,6 @@ def load_data():
                     "id": _new_id(),
                     "name": trigger,
                     "trigger": trigger,
-                    "trigger_type": "Auto",
-                    "hotkey": "",
                     "expansion_html": "<p>%s</p>" % expansion.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"),
                 })
     if "children" not in data:
@@ -136,41 +126,8 @@ def save_data(data):
     os.replace(tmp, DATA_FILE)
 
 
-def load_config():
-    """Load config.json for dialog preferences (e.g. last_trigger_type)."""
-    if not os.path.exists(CONFIG_FILE):
-        return {}
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, IOError):
-        return {}
-
-
-def save_config(config):
-    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-    tmp = CONFIG_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, CONFIG_FILE)
-
-
-def find_phrase_by_id(children, phrase_id):
-    """Recursively find a phrase dict by id."""
-    for item in children:
-        if item.get("type") == "phrase" and item.get("id") == phrase_id:
-            return item
-        if item.get("type") == "folder":
-            found = find_phrase_by_id(item.get("children", []), phrase_id)
-            if found:
-                return found
-    return None
-
-
 def collect_all_phrases(children):
-    """Flatten: list of all phrase dicts (for expansion lookup)."""
+    """Flatten: list of all phrase dicts."""
     out = []
     for item in children:
         if item.get("type") == "phrase":
@@ -181,17 +138,10 @@ def collect_all_phrases(children):
 
 
 def collect_auto_triggers(children):
-    """Return dict trigger -> phrase item (only Auto type)."""
+    """Return dict trigger -> phrase item for all phrases that have an abbreviation set."""
     result = {}
     for p in collect_all_phrases(children):
-        if p.get("trigger_type") != "Auto":
-            continue
         t = (p.get("trigger") or "").strip()
         if t:
             result[t] = p
     return result
-
-
-def collect_hotkey_phrases(children):
-    """Return phrase items configured for global Hotkey trigger mode."""
-    return [p for p in collect_all_phrases(children) if p.get("trigger_type") == "Hotkey" and (p.get("trigger") or "").strip()]

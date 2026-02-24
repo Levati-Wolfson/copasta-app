@@ -169,19 +169,8 @@ def _show_info_dialog(parent, title, message):
     parent.wait_window(d)
 
 
-def apply_theme(root, get_settings):
-    """Apply modern dark theme using ttkbootstrap."""
-    try:
-        # ttkbootstrap theme is set on window creation, but we can adjust colors here if needed
-        style = ttk.Style()
-        # Additional manual styling for tk.Text widgets (not themed automatically)
-        pass
-    except Exception:
-        logging.exception("Failed to apply theme.")
-
-
 class PhraseDialog(tk.Toplevel):
-    """Single Add/Edit phrase window: name, trigger type (Auto/Hotkey), and rich editor."""
+    """Single Add/Edit phrase window: name, abbreviation, and rich editor."""
 
     def __init__(
         self,
@@ -214,9 +203,6 @@ class PhraseDialog(tk.Toplevel):
         # Apply dark title bar for Windows 10/11
         apply_dark_titlebar(self)
 
-        config = data_model.load_config()
-        last_trigger = config.get("last_trigger_type", "Auto")
-
         # Name
         top = ttk.Frame(self, padding="8 8 8 4")
         top.pack(fill=tk.X)
@@ -224,31 +210,17 @@ class PhraseDialog(tk.Toplevel):
         self._name_var = tk.StringVar(value=(phrase_item.get("name") if phrase_item else ""))
         ttk.Entry(top, textvariable=self._name_var, width=60).pack(fill=tk.X, pady=(4, 8))
 
-        # Trigger type
-        trig_frame = ttk.Labelframe(self, text="Trigger", padding="8 4 8 8")
+        # Abbreviation
+        trig_frame = ttk.Labelframe(self, text="Abbreviation", padding="8 4 8 8")
         trig_frame.pack(fill=tk.X, padx=8, pady=4)
-        self._trigger_type = tk.StringVar(value=phrase_item.get("trigger_type") if phrase_item else last_trigger)
-        ttk.Radiobutton(
-            trig_frame,
-            text="Auto (expand when you type the abbreviation)",
-            variable=self._trigger_type,
-            value="Auto",
-        ).pack(anchor=tk.W)
-        ttk.Radiobutton(
-            trig_frame,
-            text="Hotkey (expand when you press a key combo)",
-            variable=self._trigger_type,
-            value="Hotkey",
-        ).pack(anchor=tk.W)
         ttk.Label(
             trig_frame,
-            text="For both trigger types, use the abbreviation below.",
+            text="Type this to auto-expand the phrase (leave empty to paste from the overlay only).",
             font=("Segoe UI", 8),
         ).pack(anchor=tk.W)
         self._trigger_var = tk.StringVar(value=(phrase_item.get("trigger") if phrase_item else ""))
-        ttk.Label(trig_frame, text="Abbreviation (trigger):").pack(anchor=tk.W)
         self._trigger_entry = ttk.Entry(trig_frame, textvariable=self._trigger_var, width=30)
-        self._trigger_entry.pack(anchor=tk.W, pady=(0, 2))
+        self._trigger_entry.pack(anchor=tk.W, pady=(4, 2))
         self._trigger_warning = ttk.Label(trig_frame, text="", bootstyle="danger")
         self._trigger_warning.pack(anchor=tk.W, pady=(0, 2))
 
@@ -306,17 +278,12 @@ class PhraseDialog(tk.Toplevel):
         if not self._validate_trigger():
             return
         name = self._name_var.get().strip()
-        trigger_type = self._trigger_type.get()
         trigger = self._trigger_var.get().strip()
         expansion_html = self._editor.get_html()
-        # Persist last trigger type
-        config = data_model.load_config()
-        config["last_trigger_type"] = trigger_type
-        data_model.save_config(config)
 
         if self._phrase:
             self._phrase["name"] = name
-            self._phrase["trigger_type"] = trigger_type
+            self._phrase["trigger_type"] = "Auto"
             self._phrase["trigger"] = trigger
             self._phrase["expansion_html"] = expansion_html
         else:
@@ -325,7 +292,7 @@ class PhraseDialog(tk.Toplevel):
                 "id": _new_id(),
                 "name": name,
                 "trigger": trigger,
-                "trigger_type": trigger_type,
+                "trigger_type": "Auto",
                 "expansion_html": expansion_html,
             }
             self._parent_children.append(new_phrase)
@@ -388,11 +355,6 @@ class MainWindow:
         file_menu.add_command(label="Quit", command=self._quit)
         file_menubutton.config(menu=file_menu)
         
-        if self._on_settings:
-            self._settings_cmd = self._open_settings
-        else:
-            self._settings_cmd = None
-
         # Paned: left tree, right content (with visible sash/separator)
         paned = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -487,7 +449,10 @@ class MainWindow:
         self._drop_mode = None  # "into" | "before" | "after"
         self._tree.tag_configure("drop_target_into", background="#cce0ff")
         # Thin line shown between items when dropping "between" (no row highlight)
-        self._drop_line = tk.Frame(self._tree.master, height=2, bg="#ffffff", highlightthickness=0)
+        self._drop_line = tk.Toplevel(self._tree)
+        self._drop_line.overrideredirect(True)
+        self._drop_line.configure(bg="#ffffff")
+        self._drop_line.withdraw()
         self._tree.bind("<ButtonPress-1>", self._on_drag_start)
         self._tree.bind("<B1-Motion>", self._on_drag_motion)
         self._tree.bind("<ButtonRelease-1>", self._on_drag_end)
@@ -504,7 +469,7 @@ class MainWindow:
             self._drop_target_iid = None
             self._drop_mode = None
         try:
-            self._drop_line.place_forget()
+            self._drop_line.withdraw()
         except Exception:
             logging.exception("Failed hiding drag-drop insertion line.")
 
@@ -566,13 +531,12 @@ class MainWindow:
                         line_y = y if mode == "before" else y + h
                         # Position line in tree's parent; y relative to tree + tree's offset
                         ty = self._tree.winfo_y()
-                        self._drop_line.place(
-                            in_=self._tree.master,
-                            x=self._tree.winfo_x(),
-                            y=ty + line_y - 1,
-                            width=self._tree.winfo_width(),
-                            height=2,
-                        )
+                        abs_x = self._tree.winfo_rootx()
+                        abs_y = self._tree.winfo_rooty() + line_y - 1
+                        w = self._tree.winfo_width()
+                        self._drop_line.geometry(f"{w}x2+{abs_x}+{abs_y}")
+                        self._drop_line.deiconify()
+                        self._drop_line.lift()
             except Exception:
                 logging.exception("Failed updating drag-drop visual indicator.")
 
@@ -642,9 +606,8 @@ class MainWindow:
         if item and item.get("type") == "phrase":
             html = item.get("expansion_html") or ""
             trig = (item.get("trigger") or "").strip()
-            trig_type = (item.get("trigger_type") or "Auto").lower()
             self._right_label.config(text="Phrase Preview")
-            self._preview_abbr_label.config(text="Abbreviation: %s     (%s)" % (trig, trig_type))
+            self._preview_abbr_label.config(text=("Abbreviation: %s" % trig) if trig else "No abbreviation set")
             self._preview_editor.set_html(html)
         else:
             self._preview_editor.set_html("")
@@ -751,7 +714,7 @@ class MainWindow:
             "id": _new_id(),
             "name": "Copy of " + (item.get("name") or "phrase"),
             "trigger": "",
-            "trigger_type": item.get("trigger_type", "Auto"),
+            "trigger_type": "Auto",
             "expansion_html": item.get("expansion_html") or "",
         }
         children.append(clone)
@@ -775,8 +738,6 @@ class MainWindow:
     def _save_and_refresh(self):
         self._save_data(self._get_data())
         self._refresh_tree()
-        if hasattr(self, "_on_phrase_save"):
-            self._on_phrase_save()
 
     def _wait_dialog(self, d):
         self.root.wait_window(d)
@@ -784,9 +745,6 @@ class MainWindow:
     def _open_settings(self):
         if self._on_settings:
             self._on_settings()
-
-    def set_phrase_save_callback(self, cb):
-        self._on_phrase_save = cb
 
     def _load_geometry(self):
         if self._get_settings:
@@ -865,13 +823,6 @@ class SettingsDialog(tk.Toplevel):
         self._save_hotkey_btn = ttk.Button(row1, text="Save", command=self._save_recorded_hotkey)
         self._pending_hotkey = None
 
-        row2 = ttk.Frame(self)
-        row2.pack(fill=tk.X, padx=8, pady=4)
-        ttk.Label(row2, text="Expansion hotkey:").pack(side=tk.LEFT, padx=(0, 8))
-        self._expansion_hotkey_var = tk.StringVar(value=s.get("expansion_hotkey", "ctrl+alt+e"))
-        ttk.Entry(row2, textvariable=self._expansion_hotkey_var, width=25).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Label(row2, text="(For phrases with hotkey trigger)", font=("Segoe UI", 8)).pack(side=tk.LEFT)
-
         ttk.Label(self, text="Popup position").pack(anchor=tk.W, padx=8, pady=(12, 4))
         self._pos_var = tk.StringVar(value=s.get("floating_menu_position", "cursor"))
         ttk.Radiobutton(self, text="At text cursor location", variable=self._pos_var, value="cursor").pack(anchor=tk.W, padx=8)
@@ -923,55 +874,36 @@ class SettingsDialog(tk.Toplevel):
         if self._on_position_picker:
             self._on_position_picker(self)
 
-    def _record_hotkey(self):
+    def _start_recording(self, target_var, on_apply):
+        """Start listening for the next key combo and call on_apply(combo, remover) when captured."""
         import keyboard
-        # Ensure an older recorder hook is not still active.
         if getattr(self, "_hotkey_hook", None):
             try:
                 self._hotkey_hook()
             except Exception:
                 logging.exception("Failed removing existing settings hotkey hook.")
             self._hotkey_hook = None
-        self._hotkey_var.set("(press key combo...)")
+        target_var.set("(press key combo...)")
         self._recording = [True]
-        self._pending_hotkey = None
         self._active_modifiers = set()
-        try:
-            self._save_hotkey_btn.pack_forget()
-        except Exception:
-            logging.exception("Failed to hide hotkey save button before recording.")
 
         def norm(name):
             n = (name or "").strip().lower()
             aliases = {
-                "left ctrl": "ctrl",
-                "right ctrl": "ctrl",
-                "control": "ctrl",
-                "left shift": "shift",
-                "right shift": "shift",
-                "skift": "shift",
-                "vänster skift": "shift",
-                "hoger skift": "shift",
-                "höger skift": "shift",
-                "left alt": "alt",
-                "right alt": "alt",
-                "alt gr": "alt",
-                "altgr": "alt",
-                "left windows": "win",
-                "right windows": "win",
-                "windows": "win",
+                "left ctrl": "ctrl", "right ctrl": "ctrl", "control": "ctrl",
+                "left shift": "shift", "right shift": "shift", "skift": "shift",
+                "vänster skift": "shift", "hoger skift": "shift", "höger skift": "shift",
+                "left alt": "alt", "right alt": "alt", "alt gr": "alt", "altgr": "alt",
+                "left windows": "win", "right windows": "win", "windows": "win",
             }
             return aliases.get(n, n)
 
         def is_modifier_like(name, scan_code=None):
             n = (name or "").strip().lower()
-            # Layout-independent fallback: common modifier scan codes.
-            # Shift: 42/54, Ctrl: 29/3613, Alt: 56/3640, Win: 3675/3676
             if scan_code in (42, 54, 29, 3613, 56, 3640, 3675, 3676):
                 return True
             if n in ("ctrl", "shift", "alt", "win"):
                 return True
-            # Catch localized/variant names such as shift_l, right shift, etc.
             return any(token in n for token in ("shift", "skift", "ctrl", "control", "alt", "win", "windows"))
 
         def safe_pressed(name):
@@ -1011,49 +943,38 @@ class SettingsDialog(tk.Toplevel):
                         self._active_modifiers.add("win")
                     return
                 parts = []
-                if (
-                    "ctrl" in self._active_modifiers
-                    or safe_pressed("ctrl")
-                    or safe_pressed("left ctrl")
-                    or safe_pressed("right ctrl")
-                    or safe_pressed("control")
-                ):
+                if ("ctrl" in self._active_modifiers or safe_pressed("ctrl")
+                        or safe_pressed("left ctrl") or safe_pressed("right ctrl")
+                        or safe_pressed("control")):
                     parts.append("ctrl")
-                if (
-                    "shift" in self._active_modifiers
-                    or safe_pressed("shift")
-                    or safe_pressed("left shift")
-                    or safe_pressed("right shift")
-                ):
+                if ("shift" in self._active_modifiers or safe_pressed("shift")
+                        or safe_pressed("left shift") or safe_pressed("right shift")):
                     parts.append("shift")
-                if (
-                    "alt" in self._active_modifiers
-                    or safe_pressed("alt")
-                    or safe_pressed("left alt")
-                    or safe_pressed("right alt")
-                    or safe_pressed("alt gr")
-                    or safe_pressed("altgr")
-                ):
+                if ("alt" in self._active_modifiers or safe_pressed("alt")
+                        or safe_pressed("left alt") or safe_pressed("right alt")
+                        or safe_pressed("alt gr") or safe_pressed("altgr")):
                     parts.append("alt")
-                if (
-                    "win" in self._active_modifiers
-                    or safe_pressed("windows")
-                    or safe_pressed("left windows")
-                    or safe_pressed("right windows")
-                    or safe_pressed("win")
-                ):
+                if ("win" in self._active_modifiers or safe_pressed("windows")
+                        or safe_pressed("left windows") or safe_pressed("right windows")
+                        or safe_pressed("win")):
                     parts.append("win")
                 parts.append(key_name)
-                # Deduplicate while keeping order (avoid results like "shift+shift")
                 combo = "+".join(dict.fromkeys(p for p in parts if p))
                 remover = getattr(self, "_hotkey_hook", None)
                 self._recording[0] = False
-                self.after(0, lambda: self._apply_recorded_hotkey(combo, remover))
+                self.after(0, lambda: on_apply(combo, remover))
             except Exception:
                 logging.exception("Settings hotkey record handler failed.")
 
         self._hotkey_hook = keyboard.on_press(on_key)
-        # No timeout: keep listening until combo captured or dialog closes.
+
+    def _record_hotkey(self):
+        self._pending_hotkey = None
+        try:
+            self._save_hotkey_btn.pack_forget()
+        except Exception:
+            logging.exception("Failed to hide hotkey save button before recording.")
+        self._start_recording(self._hotkey_var, self._apply_recorded_hotkey)
 
     def _apply_recorded_hotkey(self, combo, remover):
         self._pending_hotkey = combo
@@ -1069,7 +990,6 @@ class SettingsDialog(tk.Toplevel):
     def _save_recorded_hotkey(self):
         if self._pending_hotkey:
             self._hotkey_var.set(self._pending_hotkey)
-        # Persist immediately from this Save button
         s = self._get_settings()
         s["floating_menu_hotkey"] = self._hotkey_var.get().strip() or "ctrl+shift+space"
         self._save_settings(s)
@@ -1094,7 +1014,6 @@ class SettingsDialog(tk.Toplevel):
     def _ok(self):
         s = self._get_settings()
         s["floating_menu_hotkey"] = self._hotkey_var.get().strip() or "ctrl+shift+space"
-        s["expansion_hotkey"] = self._expansion_hotkey_var.get().strip() or "ctrl+alt+e"
         s["floating_menu_position"] = self._pos_var.get()
         if self._start_var is not None:
             s["start_with_windows"] = self._start_var.get()

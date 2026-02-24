@@ -1,6 +1,5 @@
 """Rich text editor widget: toolbar (Bold, Italic, Underline, etc.) and Text with HTML export."""
 import html as html_module
-import re
 import tkinter as tk
 import webbrowser
 import ctypes
@@ -119,9 +118,6 @@ class RichTextEditor(ttk.Frame):
         self._height = height
         self._readonly = bool(readonly)
         self._link_url = tk.StringVar(value="https://")
-        # Used by text/font rendering regardless of toolbar visibility.
-        self._font_family_var = tk.StringVar(value="Segoe UI")
-        self._font_size_var = tk.StringVar(value="10")
         self._link_tooltip = None
         self._link_tooltip_text = ""
         self._style = ttk.Style()
@@ -158,25 +154,6 @@ class RichTextEditor(ttk.Frame):
         b_undo.pack(side=tk.LEFT, padx=2)
         b_redo = ttk.Button(tb, text="Redo", width=5, command=self._redo, bootstyle="secondary")
         b_redo.pack(side=tk.LEFT, padx=2)
-        ttk.Separator(tb, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
-        self._font_family_combo = ttk.Combobox(
-            tb,
-            textvariable=self._font_family_var,
-            width=14,
-            state="readonly",
-            values=("Segoe UI", "Arial", "Calibri", "Consolas", "Times New Roman", "Verdana"),
-        )
-        self._font_family_combo.pack(side=tk.LEFT, padx=2)
-        self._font_family_combo.bind("<<ComboboxSelected>>", self._on_font_change)
-        self._font_size_combo = ttk.Combobox(
-            tb,
-            textvariable=self._font_size_var,
-            width=4,
-            state="readonly",
-            values=("8", "9", "10", "11", "12", "14", "16", "18", "20", "24", "28", "32"),
-        )
-        self._font_size_combo.pack(side=tk.LEFT, padx=2)
-        self._font_size_combo.bind("<<ComboboxSelected>>", self._on_font_change)
         ttk.Separator(tb, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
         b_bold = ttk.Button(
             tb, text="B", width=2, command=lambda: self._toggle_tag(TAG_BOLD), bootstyle="secondary", style="EditorBold.TButton"
@@ -225,9 +202,12 @@ class RichTextEditor(ttk.Frame):
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._text.config(yscrollcommand=scroll.set)
         scroll.config(command=self._text.yview)
-        self._apply_text_font_settings()
+        self._text.tag_configure(TAG_BOLD, font=("Segoe UI", 10, "bold"))
+        self._text.tag_configure(TAG_ITALIC, font=("Segoe UI", 10, "italic"))
         self._text.tag_configure(TAG_BOLDITALIC, font=("Segoe UI", 10, "bold italic"))
         self._text.tag_configure(TAG_UNDERLINE, underline=True)
+        self._text.tag_configure(TAG_SUBSCRIPT, offset=-4, font=("Segoe UI", 8))
+        self._text.tag_configure(TAG_SUPERSCRIPT, offset=4, font=("Segoe UI", 8))
         self._text.tag_configure(TAG_LINK, foreground="#6eb4ff", underline=True)
         self._text.tag_raise(TAG_BOLDITALIC)
 
@@ -238,25 +218,6 @@ class RichTextEditor(ttk.Frame):
     def _toggle_tag_shortcut(self, tag_name):
         self._toggle_tag(tag_name)
         return "break"
-
-    def _on_font_change(self, _event=None):
-        self._apply_text_font_settings()
-        self._refresh_derived_tags()
-
-    def _apply_text_font_settings(self):
-        family = (self._font_family_var.get() or "Segoe UI").strip()
-        try:
-            size = int(self._font_size_var.get())
-        except Exception:
-            size = 10
-            self._font_size_var.set("10")
-        self._text.configure(font=(family, size))
-        self._text.tag_configure(TAG_BOLD, font=(family, size, "bold"))
-        self._text.tag_configure(TAG_ITALIC, font=(family, size, "italic"))
-        self._text.tag_configure(TAG_BOLDITALIC, font=(family, size, "bold italic"))
-        sub_sup_size = max(6, size - 2)
-        self._text.tag_configure(TAG_SUBSCRIPT, offset=-4, font=(family, sub_sup_size))
-        self._text.tag_configure(TAG_SUPERSCRIPT, offset=4, font=(family, sub_sup_size))
 
     def _refresh_derived_tags(self):
         """Refresh rendered combined-style tags (currently bold+italic)."""
@@ -496,7 +457,7 @@ class RichTextEditor(ttk.Frame):
             out.append(close_tag(open_stack.pop()))
 
         html = "".join(out).strip()
-        return html
+        return html if html else "<p></p>"
 
     def set_html(self, html_fragment):
         """Import basic HTML into the editor and restore text tags."""

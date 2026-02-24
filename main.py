@@ -1,12 +1,34 @@
 """
 Copasta - Windows desktop app.
-Folders, rich text paste, Auto/Hotkey triggers, floating phrase menu.
+Folders, rich text paste, auto-expand triggers, floating phrase menu.
 """
 import sys
 import os
 import logging
+import ctypes
 
 APP_VERSION = "1.0.0"
+
+_SINGLE_INSTANCE_MUTEX = None  # held for process lifetime to block second instances
+
+
+def _ensure_single_instance():
+    """
+    Acquire a named Windows mutex. If it already exists another instance is running:
+    bring its window to the front and exit this process immediately.
+    """
+    global _SINGLE_INSTANCE_MUTEX
+    MUTEX_NAME = "Global\\CopastaSingleInstanceMutex"
+    handle = ctypes.windll.kernel32.CreateMutexW(None, False, MUTEX_NAME)
+    err = ctypes.windll.kernel32.GetLastError()
+    if err == 183:  # ERROR_ALREADY_EXISTS
+        hwnd = ctypes.windll.user32.FindWindowW(None, "Copasta")
+        if hwnd:
+            SW_RESTORE = 9
+            ctypes.windll.user32.ShowWindow(hwnd, SW_RESTORE)
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+        sys.exit(0)
+    _SINGLE_INSTANCE_MUTEX = handle  # keep reference so OS doesn't release the mutex
 
 import data_model
 import expansion
@@ -26,12 +48,13 @@ def _setup_logging():
     )
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    root.setLevel(logging.DEBUG)
     root.addHandler(handler)
     logging.info("Logging initialized: %s", log_path)
 
 
 def main():
+    _ensure_single_instance()
     _setup_logging()
     start_minimized = "--minimized" in sys.argv
     data = data_model.load_data()
@@ -51,7 +74,6 @@ def main():
             data["settings"] = new_data.get("settings", data.get("settings", {}))
         data_model.save_data(data)
 
-    # Expansion engine (Auto + Hotkey, clipboard paste)
     engine = expansion.ExpansionEngine(get_children, get_settings)
     engine.start()
 
@@ -93,8 +115,6 @@ def main():
         on_settings_callback=None,
         on_quit_callback=lambda: quit_app(),
     )
-    # Apply saved theme (dark mode) only after window is ready
-    dashboard.root.after(100, lambda: gui.apply_theme(dashboard.root, get_settings))
     if start_minimized:
         dashboard.root.after(0, dashboard.hide)
 
@@ -123,10 +143,7 @@ def main():
             persist_settings,
             on_position_picker=lambda dlg: _open_position_picker(dlg, save_xy),
         )
-        def on_settings_ok():
-            gui.apply_theme(dashboard.root, get_settings)
-            engine.refresh_hotkeys()
-        d.set_on_ok(on_settings_ok)
+        d.set_on_ok(lambda: None)
         d.grab_set()
         try:
             dashboard.root.wait_window(d)
@@ -176,14 +193,7 @@ def main():
             settings_dialog.bind("<Destroy>", close_picker_on_settings_destroy, add="+")
             settings_dialog._picker_destroy_bound = True
 
-    # Re-attach settings: MainWindow was built without on_settings_callback; we need to open settings
     dashboard._on_settings = open_settings
-
-    def on_phrase_save():
-        engine.refresh_hotkeys()
-
-    dashboard.set_phrase_save_callback(on_phrase_save)
-
     tray_icon = None
 
     def show_window():
