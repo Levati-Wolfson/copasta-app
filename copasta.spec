@@ -1,5 +1,4 @@
 # -*- mode: python ; coding: utf-8 -*-
-# Portable build: data stored next to the .exe, no installer needed.
 
 block_cipher = None
 
@@ -7,11 +6,8 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[
-        ('portable', '.'),  # marker file: tells the app to store data next to the .exe
-    ],
+    datas=[],
     hiddenimports=[
-        'keyboard',
         'pynput',
         'pynput.keyboard',
         'pystray',

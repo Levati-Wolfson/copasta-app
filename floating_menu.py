@@ -27,6 +27,7 @@ class FloatingMenu:
         self._pinned = False
         self._hover_timers = {}  # level -> after id (for folder open)
         self._hover_indices = {}  # level -> hovered index
+        self._close_timers = {}  # level -> after id (for cascade close grace period)
         self._preview_timer = None
         self._preview_win = None
         self._cascade_levels = {}  # level>=1 -> {"win","listbox","items"}
@@ -141,6 +142,18 @@ class FloatingMenu:
             except Exception:
                 logging.exception("Failed to cancel floating menu hover timer.")
 
+    def _cancel_close_timer(self, level):
+        tid = self._close_timers.pop(level, None)
+        if tid and self._root:
+            try:
+                self._root.after_cancel(tid)
+            except Exception:
+                logging.exception("Failed to cancel floating menu close timer.")
+
+    def _do_delayed_close(self, level):
+        self._close_timers.pop(level, None)
+        self._close_cascades_from(level)
+
     def _cancel_preview_timer(self):
         if self._preview_timer and self._root:
             try:
@@ -150,6 +163,8 @@ class FloatingMenu:
             self._preview_timer = None
 
     def _close_cascades_from(self, start_level):
+        for lv in [l for l in list(self._close_timers.keys()) if l >= start_level]:
+            self._cancel_close_timer(lv)
         for level in sorted([lv for lv in self._cascade_levels.keys() if lv >= start_level], reverse=True):
             win = self._cascade_levels[level]["win"]
             try:
@@ -184,6 +199,10 @@ class FloatingMenu:
         if idx < 0 or idx >= len(items):
             return
         if self._hover_indices.get(level) == idx:
+            # Still on the same item — if it's a folder, make sure its cascade
+            # isn't being scheduled for closing (e.g. cursor briefly left and returned).
+            if items[idx].get("type") == "folder":
+                self._cancel_close_timer(level + 1)
             return
         self._hover_indices[level] = idx
         self._cancel_hover_timer(level)
@@ -192,9 +211,7 @@ class FloatingMenu:
         if item.get("type") == "folder":
             self._hide_preview()
             self._close_cascades_from(level + 1)
-            self._hover_timers[level] = self._root.after(
-                250, lambda lv=level, i=idx: self._open_folder_for_hover(lv, i)
-            )
+            self._open_folder_for_hover(level, idx)
         else:
             self._close_cascades_from(level + 1)
             self._preview_timer = self._root.after(
@@ -205,6 +222,14 @@ class FloatingMenu:
         self._cancel_hover_timer(level)
         self._cancel_preview_timer()
         self._hide_preview()
+        # Schedule close of the child cascade after a grace period so that a
+        # momentary slip of the cursor doesn't immediately dismiss it.
+        child_level = level + 1
+        if self._cascade_levels.get(child_level) and self._root:
+            self._cancel_close_timer(child_level)
+            self._close_timers[child_level] = self._root.after(
+                500, lambda lv=child_level: self._do_delayed_close(lv)
+            )
 
     def _open_folder_for_hover(self, level, idx):
         self._cancel_hover_timer(level)
@@ -219,7 +244,29 @@ class FloatingMenu:
             return
         self._open_cascade(level + 1, state["win"], state["listbox"], folder_item, idx)
 
+    def _on_cascade_enter(self, level, event):
+        """Cursor entered the cascade window — cancel any pending close for it."""
+        self._cancel_close_timer(level)
+
+    def _on_cascade_leave(self, level, event):
+        """Cursor left the cascade window — schedule a delayed close."""
+        state = self._cascade_levels.get(level)
+        if not state or not self._root:
+            return
+        win = state["win"]
+        # Ignore internal leave events (cursor moving between child widgets).
+        x, y = event.x_root, event.y_root
+        wx, wy = win.winfo_rootx(), win.winfo_rooty()
+        ww, wh = win.winfo_width(), win.winfo_height()
+        if wx <= x < wx + ww and wy <= y < wy + wh:
+            return
+        self._cancel_close_timer(level)
+        self._close_timers[level] = self._root.after(
+            500, lambda lv=level: self._do_delayed_close(lv)
+        )
+
     def _open_cascade(self, level, parent_win, parent_listbox, folder_item, row_idx):
+        self._cancel_close_timer(level)
         self._close_cascades_from(level)
         win = tk.Toplevel(self._root)
         win.overrideredirect(True)
@@ -245,6 +292,8 @@ class FloatingMenu:
             name = child.get("name") or ("New Folder" if child.get("type") == "folder" else "(no name)")
             lb.insert(tk.END, "  📁 " + name if child.get("type") == "folder" else "  📄 " + name)
         self._bind_listbox(lb, level)
+        win.bind("<Enter>", lambda e, lv=level: self._on_cascade_enter(lv, e))
+        win.bind("<Leave>", lambda e, lv=level: self._on_cascade_leave(lv, e))
         self._cascade_levels[level] = {"win": win, "listbox": lb, "items": items}
         win.update_idletasks()
         bbox = parent_listbox.bbox(row_idx)
@@ -440,6 +489,8 @@ class FloatingMenu:
         self._cancel_preview_timer()
         for level in list(self._hover_timers.keys()):
             self._cancel_hover_timer(level)
+        for level in list(self._close_timers.keys()):
+            self._cancel_close_timer(level)
         self._hide_preview()
         self._close_cascades_from(1)
         self._set_pinned(False)
@@ -455,6 +506,8 @@ class FloatingMenu:
         self._cancel_preview_timer()
         for level in list(self._hover_timers.keys()):
             self._cancel_hover_timer(level)
+        for level in list(self._close_timers.keys()):
+            self._cancel_close_timer(level)
         self._hide_preview()
         self._close_cascades_from(1)
         if self._root:

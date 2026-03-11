@@ -9,7 +9,7 @@ def _resolve_data_dir():
     """
     Resolve where Phrases.json is stored.
 
-    - Bundled .exe: always next to the .exe (portable-only distribution).
+    - Bundled .exe: always next to the .exe.
     - Dev (source): next to the .py files.
     """
     if getattr(sys, "frozen", False):

@@ -48,7 +48,7 @@ def _setup_logging():
     )
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
     root = logging.getLogger()
-    root.setLevel(logging.DEBUG)
+    root.setLevel(logging.INFO)
     root.addHandler(handler)
     logging.info("Logging initialized: %s", log_path)
 
@@ -88,20 +88,18 @@ def main():
         data_model.save_data(data)
 
     floating = floating_menu.FloatingMenu(get_data, get_settings, paste_phrase, on_save_position=save_floating_position)
-    floating_hotkey_remove = [None]
+    _hotkey_poller = [None]
 
     def register_floating_hotkey():
-        if floating_hotkey_remove[0]:
-            try:
-                floating_hotkey_remove[0]()
-            except Exception:
-                pass
-        import keyboard
-        hotkey = get_settings().get("floating_menu_hotkey", "ctrl+shift+space")
+        if _hotkey_poller[0] is not None:
+            _hotkey_poller[0].stop()
+            _hotkey_poller[0] = None
+        from hotkey import HotkeyPoller
+        hk = get_settings().get("floating_menu_hotkey", "ctrl+shift+space")
         try:
-            floating_hotkey_remove[0] = keyboard.add_hotkey(hotkey, lambda: floating.show(), suppress=True)
+            _hotkey_poller[0] = HotkeyPoller(hk, lambda: floating.show())
         except Exception:
-            floating_hotkey_remove[0] = None
+            logging.exception("Failed to start hotkey poller.")
 
     register_floating_hotkey()
 
@@ -120,12 +118,9 @@ def main():
 
     def open_settings():
         # Disable floating window hotkey while settings are open
-        if floating_hotkey_remove[0]:
-            try:
-                floating_hotkey_remove[0]()
-            except Exception:
-                pass
-            floating_hotkey_remove[0] = None
+        if _hotkey_poller[0] is not None:
+            _hotkey_poller[0].stop()
+            _hotkey_poller[0] = None
 
         def save_xy(x, y):
             s = get_settings()
@@ -202,11 +197,8 @@ def main():
     def quit_app():
         def do_quit():
             engine.stop()
-            if floating_hotkey_remove[0]:
-                try:
-                    floating_hotkey_remove[0]()
-                except Exception:
-                    pass
+            if _hotkey_poller[0] is not None:
+                _hotkey_poller[0].stop()
             floating.destroy()
             if tray_icon:
                 try:
