@@ -138,7 +138,7 @@ def main():
             persist_settings,
             on_position_picker=lambda dlg: _open_position_picker(dlg, save_xy),
         )
-        d.set_on_ok(lambda: None)
+        d.set_on_ok(lambda: dashboard._apply_font_settings())
         d.grab_set()
         try:
             dashboard.root.wait_window(d)

@@ -1,12 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+
 block_cipher = None
+
+SPEC_ROOT = os.path.abspath(SPECPATH)
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        (os.path.join(SPEC_ROOT, 'Newicon.png'), '.'),
+    ],
     hiddenimports=[
         'keyboard',
         'pynput',
@@ -16,6 +22,8 @@ a = Analysis(
         'PIL',
         'PIL.Image',
         'PIL.ImageDraw',
+        'PIL.ImageTk',
+        'app_icon',
         'win32clipboard',
         'win32con',
         'win32api',
@@ -52,4 +60,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=os.path.join(SPEC_ROOT, 'Newicon.ico'),
 )

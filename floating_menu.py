@@ -2,8 +2,11 @@
 import re
 import logging
 import tkinter as tk
+import tkinter.font as tkFont
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
+
+import app_icon
 
 
 def _strip_html(html):
@@ -43,20 +46,22 @@ class FloatingMenu:
         if self._root is not None:
             return
         self._root = tk.Toplevel()
+        app_icon.apply_window_icon(self._root)
         self._root.overrideredirect(True)
         self._root.attributes("-topmost", True)
         self._root.configure(bg="#222222", highlightthickness=1, highlightbackground="#444444")
         # Top row with title and buttons
         top_frame = ttk.Frame(self._root)
         top_frame.pack(fill=tk.X, padx=4, pady=4)
-        ttk.Label(top_frame, text="Phrases", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=4)
+        self._header_label = ttk.Label(top_frame, text="Phrases", font=("Segoe UI", 10, "bold"))
+        self._header_label.pack(side=tk.LEFT, padx=4)
         self._close_btn = ttk.Button(top_frame, text="✖", width=2, command=self._hide, bootstyle="secondary")
         self._close_btn.pack(side=tk.RIGHT, padx=1)
         self._pin_btn = ttk.Button(top_frame, text="📌", width=2, command=self._toggle_pin, bootstyle="secondary")
         self._pin_btn.pack(side=tk.RIGHT, padx=2)
         # List frame: root folders and phrases
         list_frame = ttk.Frame(self._root)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 4))
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=6)
         self._listbox = tk.Listbox(
             list_frame,
             height=8,
@@ -80,6 +85,25 @@ class FloatingMenu:
         top_frame.bind("<B1-Motion>", self._on_title_motion)
         top_frame.bind("<ButtonRelease-1>", self._on_title_release)
         self._root.protocol("WM_DELETE_WINDOW", self._hide)
+        self._root.bind("<FocusOut>", self._on_root_focus_out)
+        self._root.bind("<Escape>", lambda e: self._hide())
+
+    def _font_offset(self):
+        return {"small": 0, "medium": 2, "large": 4}.get(
+            self._get_settings().get("font_size", "small"), 0
+        )
+
+    def _fit_listbox_to_content(self, listbox, texts, min_chars=22, max_px=600):
+        """Resize listbox width (in chars) to fit the longest entry."""
+        if not texts:
+            return
+        try:
+            font = tkFont.Font(font=listbox.cget("font"))
+            max_text_px = min(max(font.measure(t) for t in texts), max_px)
+            char_px = font.measure("0") or 7
+            listbox.config(width=max(min_chars, max_text_px // char_px + 3))
+        except Exception:
+            logging.exception("Failed to fit listbox to content.")
 
     def _bind_listbox(self, listbox, level):
         listbox.bind("<Button-1>", lambda e, lv=level: self._on_list_click(lv, e))
@@ -123,11 +147,15 @@ class FloatingMenu:
     def _populate_root(self):
         self._listbox.delete(0, tk.END)
         self._items = []
+        texts = []
         data = self._get_data()
         for item in data.get("children", []):
             name = item.get("name") or ("New Folder" if item.get("type") == "folder" else "(no name)")
-            self._listbox.insert(tk.END, "  📁 " + name if item.get("type") == "folder" else "  📄 " + name)
+            label = "  📁 " + name if item.get("type") == "folder" else "  📄 " + name
+            self._listbox.insert(tk.END, label)
             self._items.append(item)
+            texts.append(label)
+        self._fit_listbox_to_content(self._listbox, texts)
 
     def _get_level_state(self, level):
         if level == 0:
@@ -222,6 +250,7 @@ class FloatingMenu:
         self._cancel_hover_timer(level)
         self._cancel_preview_timer()
         self._hide_preview()
+        self._hover_indices.pop(level, None)
         # Schedule close of the child cascade after a grace period so that a
         # momentary slip of the cursor doesn't immediately dismiss it.
         child_level = level + 1
@@ -245,8 +274,9 @@ class FloatingMenu:
         self._open_cascade(level + 1, state["win"], state["listbox"], folder_item, idx)
 
     def _on_cascade_enter(self, level, event):
-        """Cursor entered the cascade window — cancel any pending close for it."""
-        self._cancel_close_timer(level)
+        """Cursor entered the cascade window — cancel pending close for this and all parent levels."""
+        for lv in range(1, level + 1):
+            self._cancel_close_timer(lv)
 
     def _on_cascade_leave(self, level, event):
         """Cursor left the cascade window — schedule a delayed close."""
@@ -272,14 +302,14 @@ class FloatingMenu:
         win.overrideredirect(True)
         win.attributes("-topmost", True)
         win.configure(bg="#222222", highlightthickness=1, highlightbackground="#444444")
-        frame = ttk.Frame(win, padding=4)
+        frame = ttk.Frame(win, padding=6)
         frame.pack(fill=tk.BOTH, expand=True)
         items = list(folder_item.get("children", []))
         lb = tk.Listbox(
             frame,
             height=max(3, min(len(items), 15)),
             width=26,
-            font=("Segoe UI", 10),
+            font=("Segoe UI", 10 + self._font_offset()),
             bg="#2b2b2b",
             fg="#ffffff",
             selectbackground="#375a7f",
@@ -288,9 +318,13 @@ class FloatingMenu:
             highlightthickness=0,
         )
         lb.pack(fill=tk.BOTH, expand=True)
+        texts = []
         for child in items:
             name = child.get("name") or ("New Folder" if child.get("type") == "folder" else "(no name)")
-            lb.insert(tk.END, "  📁 " + name if child.get("type") == "folder" else "  📄 " + name)
+            label = "  📁 " + name if child.get("type") == "folder" else "  📄 " + name
+            lb.insert(tk.END, label)
+            texts.append(label)
+        self._fit_listbox_to_content(lb, texts)
         self._bind_listbox(lb, level)
         win.bind("<Enter>", lambda e, lv=level: self._on_cascade_enter(lv, e))
         win.bind("<Leave>", lambda e, lv=level: self._on_cascade_leave(lv, e))
@@ -298,12 +332,29 @@ class FloatingMenu:
         win.update_idletasks()
         bbox = parent_listbox.bbox(row_idx)
         if bbox:
-            row_y = parent_listbox.winfo_rooty() + bbox[1]
+            # Align the first item in the cascade with the hovered row in the parent.
+            # Use the vertical center of the hovered row as the anchor point, then
+            # subtract how far the center of cascade item 0 sits below the window top.
+            row_center_y = parent_listbox.winfo_rooty() + bbox[1] + bbox[3] // 2
+            lb_bbox0 = lb.bbox(0)
+            if lb_bbox0:
+                item0_center_offset = lb.winfo_y() + lb_bbox0[1] + lb_bbox0[3] // 2
+            else:
+                item0_center_offset = 6  # fallback: frame padding only
+            row_y = row_center_y - item0_center_offset
         else:
             row_y = parent_win.winfo_rooty() + 30
-        x = parent_win.winfo_rootx() + parent_win.winfo_width() - 1
-        h = min(280, lb.winfo_reqheight() + 12)
-        win.geometry("%dx%d+%d+%d" % (200, h, x, row_y))
+        w = win.winfo_reqwidth()
+        h = min(400, win.winfo_reqheight())
+        x_right = parent_win.winfo_rootx() + parent_win.winfo_width() - 1
+        x_left = parent_win.winfo_rootx() - w + 1
+        _ml, _mt, _mr, _mb = self._get_monitor_rect(x_right, row_y)
+        if x_right + w > _mr and x_left >= _ml:
+            x = x_left
+        else:
+            x = x_right
+        x, row_y = self._clamp_window_pos(x, row_y, w, h)
+        win.geometry("%dx%d+%d+%d" % (w, h, x, row_y))
 
     def _run_phrase(self, phrase_item):
         self._cancel_preview_timer()
@@ -363,7 +414,7 @@ class FloatingMenu:
         lbl = tk.Label(
             self._preview_win,
             text=text,
-            font=("Segoe UI", 9),
+            font=("Segoe UI", 9 + self._font_offset()),
             bg="#1a1a1a",
             fg="#dddddd",
             wraplength=280,
@@ -374,6 +425,53 @@ class FloatingMenu:
         lbl.pack(fill=tk.BOTH, expand=True)
         self._preview_win.geometry("+%d+%d" % (x, y))
         self._preview_win.update_idletasks()
+        pw = self._preview_win.winfo_width()
+        ph = self._preview_win.winfo_height()
+        # Prefer right of the source window; flip left if it would go off screen
+        _ml, _mt, _mr, _mb = self._get_monitor_rect(x, y)
+        if x + pw > _mr:
+            x_left = win.winfo_rootx() - pw - 8
+            x = x_left if x_left >= _ml else max(_ml, _mr - pw)
+        cx, cy = self._clamp_window_pos(x, y, pw, ph)
+        if cx != x or cy != y:
+            self._preview_win.geometry("+%d+%d" % (cx, cy))
+
+    def _get_monitor_rect(self, x, y):
+        """Return (left, top, right, bottom) of the work area of the monitor
+        nearest to (x, y).  Falls back to the primary monitor on any error."""
+        try:
+            import ctypes
+            import ctypes.wintypes
+
+            class _MONITORINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", ctypes.c_ulong),
+                    ("rcMonitor", ctypes.wintypes.RECT),
+                    ("rcWork", ctypes.wintypes.RECT),
+                    ("dwFlags", ctypes.c_ulong),
+                ]
+
+            MONITOR_DEFAULTTONEAREST = 2
+            hmon = ctypes.windll.user32.MonitorFromPoint(
+                ctypes.wintypes.POINT(int(x), int(y)), MONITOR_DEFAULTTONEAREST
+            )
+            info = _MONITORINFO()
+            info.cbSize = ctypes.sizeof(_MONITORINFO)
+            ctypes.windll.user32.GetMonitorInfoW(hmon, ctypes.byref(info))
+            r = info.rcWork
+            return (r.left, r.top, r.right, r.bottom)
+        except Exception:
+            sw = self._root.winfo_screenwidth()
+            sh = self._root.winfo_screenheight()
+            return (0, 0, sw, sh)
+
+    def _clamp_window_pos(self, x, y, w, h):
+        """Return (x, y) adjusted so a w×h window stays fully on the monitor
+        that contains (x, y)."""
+        left, top, right, bottom = self._get_monitor_rect(x, y)
+        x = max(left, min(x, right - w))
+        y = max(top, min(y, bottom - h))
+        return x, y
 
     def _hide_preview(self):
         if self._preview_win:
@@ -450,6 +548,14 @@ class FloatingMenu:
         self._build()
         # Each open starts unpinned, even if it was pinned when closed.
         self._set_pinned(False)
+        self._hover_indices.clear()
+        # Re-apply font size in case the setting changed since last open.
+        off = self._font_offset()
+        b = 10 + off
+        if self._header_label:
+            self._header_label.configure(font=("Segoe UI", b, "bold"))
+        if self._listbox:
+            self._listbox.configure(font=("Segoe UI", b))
         self._populate_root()
         self._close_cascades_from(1)
         self._hide_preview()
@@ -459,31 +565,64 @@ class FloatingMenu:
         self._capture_target_window()
         settings = self._get_settings()
         if x is not None and y is not None:
-            self._root.geometry("+%d+%d" % (x, y))
+            px, py = x, y
         elif settings.get("floating_menu_position") == "fixed":
-            self._root.geometry("+%d+%d" % (
-                settings.get("floating_menu_x", 100),
-                settings.get("floating_menu_y", 100),
-            ))
+            px = settings.get("floating_menu_x", 100)
+            py = settings.get("floating_menu_y", 100)
         elif settings.get("floating_menu_position") == "mouse":
             try:
-                mx, my = self._get_mouse_screen_pos()
-                self._root.geometry("+%d+%d" % (mx, my))
+                px, py = self._get_mouse_screen_pos()
             except Exception:
-                self._root.geometry("+100+100")
+                px, py = 100, 100
         else:
             try:
                 caret = self._get_text_cursor_screen_pos()
                 if caret:
-                    self._root.geometry("+%d+%d" % (caret[0], caret[1]))
+                    px, py = caret
                 else:
-                    mx, my = self._get_mouse_screen_pos()
-                    self._root.geometry("+%d+%d" % (mx, my))
+                    px, py = self._get_mouse_screen_pos()
             except Exception:
-                self._root.geometry("+100+100")
+                px, py = 100, 100
+        w = self._root.winfo_reqwidth()
+        h = self._root.winfo_reqheight()
+        px, py = self._clamp_window_pos(px, py, w, h)
+        self._root.geometry("+%d+%d" % (px, py))
         self._root.deiconify()
         self._root.lift()
         self._root.attributes("-topmost", True)
+        self._root.focus_force()
+
+    def _on_root_focus_out(self, event):
+        if self._pinned or not self._root:
+            return
+        self._root.after(150, self._maybe_hide_on_focus_loss)
+
+    def _maybe_hide_on_focus_loss(self):
+        if self._pinned or not self._root:
+            return
+        try:
+            focused = self._root.focus_get()
+        except Exception:
+            focused = None
+        if focused is None:
+            self._hide()
+            return
+        our_windows = {self._root}
+        for state in self._cascade_levels.values():
+            w = state.get("win")
+            if w:
+                our_windows.add(w)
+        if self._preview_win:
+            our_windows.add(self._preview_win)
+        widget = focused
+        while widget is not None:
+            if widget in our_windows:
+                return
+            try:
+                widget = widget.master
+            except AttributeError:
+                break
+        self._hide()
 
     def _hide(self):
         self._cancel_preview_timer()
@@ -521,6 +660,7 @@ class FloatingMenu:
 def run_position_picker(parent, on_save_xy, on_close=None):
     """Show a semi-transparent draggable window; on Save store its position. on_close is called when window is closed."""
     win = tk.Toplevel(parent)
+    app_icon.apply_window_icon(win)
     win.overrideredirect(True)
     win.attributes("-alpha", 0.6)
     win.attributes("-topmost", True)

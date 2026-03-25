@@ -8,6 +8,12 @@ from html.parser import HTMLParser
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 
+# Shared rich-text clipboard for cross-editor paste within the same process.
+# "spans" is a list of (text, frozenset_of_tags, link_url_or_None).
+# "seq"   is the Windows clipboard sequence number at the time of the copy,
+#         used to detect whether the system clipboard has changed since then.
+_rich_clipboard = {"plain": None, "spans": None, "seq": None}
+
 
 # Tag names and HTML tags
 TAG_BOLD = "bold"
@@ -113,19 +119,18 @@ def _ask_hyperlink_dialog(parent, initial_url):
 class RichTextEditor(ttk.Frame):
     """Frame containing toolbar + Text with tags. get_html() returns HTML fragment."""
 
-    def __init__(self, parent, height=12, show_toolbar=True, readonly=False, **kwargs):
+    def __init__(self, parent, height=12, show_toolbar=True, readonly=False, font_size_offset=0, **kwargs):
         super().__init__(parent, **kwargs)
         self._height = height
         self._readonly = bool(readonly)
         self._link_url = tk.StringVar(value="https://")
         self._link_tooltip = None
         self._link_tooltip_text = ""
+        self._font_offset = int(font_size_offset)
         self._style = ttk.Style()
         # ttk.Button does not support per-widget font via configure(font=...),
         # so define dedicated styles for the B/I/U buttons.
-        self._style.configure("EditorBold.TButton", font=("Segoe UI", 10, "bold"))
-        self._style.configure("EditorItalic.TButton", font=("Segoe UI", 10, "italic"))
-        self._style.configure("EditorUnderline.TButton", font=("Segoe UI", 10, "underline"))
+        self._apply_toolbar_fonts()
         self._show_toolbar = bool(show_toolbar)
         if self._show_toolbar:
             self._build_toolbar()
@@ -140,6 +145,12 @@ class RichTextEditor(ttk.Frame):
         self._text.bind("<Control-y>", lambda e: self._redo())
         self._text.bind("<Control-Shift-Z>", lambda e: self._redo())
         self._text.bind("<Control-Shift-z>", lambda e: self._redo())
+        self._text.bind("<Control-c>", lambda e: self._on_copy())
+        self._text.bind("<Control-C>", lambda e: self._on_copy())
+        self._text.bind("<Control-x>", lambda e: self._on_cut())
+        self._text.bind("<Control-X>", lambda e: self._on_cut())
+        self._text.bind("<Control-v>", lambda e: self._on_paste())
+        self._text.bind("<Control-V>", lambda e: self._on_paste())
         self._text.bind("<Motion>", self._on_text_motion)
         self._text.bind("<Leave>", lambda e: self._hide_link_tooltip())
         self._text.bind("<Button-1>", self._on_text_click)
@@ -187,7 +198,7 @@ class RichTextEditor(ttk.Frame):
             text_frame,
             wrap=tk.WORD,
             height=self._height,
-            font=("Segoe UI", 10),
+            font=("Segoe UI", 10 + self._font_offset),
             padx=6,
             pady=6,
             undo=True,
@@ -202,14 +213,156 @@ class RichTextEditor(ttk.Frame):
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._text.config(yscrollcommand=scroll.set)
         scroll.config(command=self._text.yview)
-        self._text.tag_configure(TAG_BOLD, font=("Segoe UI", 10, "bold"))
-        self._text.tag_configure(TAG_ITALIC, font=("Segoe UI", 10, "italic"))
-        self._text.tag_configure(TAG_BOLDITALIC, font=("Segoe UI", 10, "bold italic"))
+        self._apply_text_fonts()
+
+    def _apply_toolbar_fonts(self):
+        b = 10 + self._font_offset
+        self._style.configure("EditorBold.TButton", font=("Segoe UI", b, "bold"))
+        self._style.configure("EditorItalic.TButton", font=("Segoe UI", b, "italic"))
+        self._style.configure("EditorUnderline.TButton", font=("Segoe UI", b, "underline"))
+
+    def _apply_text_fonts(self):
+        b = 10 + self._font_offset
+        s = 8 + self._font_offset
+        self._text.configure(font=("Segoe UI", b))
+        self._text.tag_configure(TAG_BOLD, font=("Segoe UI", b, "bold"))
+        self._text.tag_configure(TAG_ITALIC, font=("Segoe UI", b, "italic"))
+        self._text.tag_configure(TAG_BOLDITALIC, font=("Segoe UI", b, "bold italic"))
         self._text.tag_configure(TAG_UNDERLINE, underline=True)
-        self._text.tag_configure(TAG_SUBSCRIPT, offset=-4, font=("Segoe UI", 8))
-        self._text.tag_configure(TAG_SUPERSCRIPT, offset=4, font=("Segoe UI", 8))
+        self._text.tag_configure(TAG_SUBSCRIPT, offset=-4, font=("Segoe UI", s))
+        self._text.tag_configure(TAG_SUPERSCRIPT, offset=4, font=("Segoe UI", s))
         self._text.tag_configure(TAG_LINK, foreground="#6eb4ff", underline=True)
         self._text.tag_raise(TAG_BOLDITALIC)
+
+    def apply_font_size(self, font_size_offset):
+        """Re-apply all fonts with a new offset (0=small, 2=medium, 4=large)."""
+        self._font_offset = int(font_size_offset)
+        self._apply_toolbar_fonts()
+        self._apply_text_fonts()
+
+    # ------------------------------------------------------------------
+    # Rich copy / cut / paste
+    # ------------------------------------------------------------------
+
+    def _clipboard_seq(self):
+        """Return the Windows clipboard sequence number (increments on every change)."""
+        try:
+            import win32clipboard
+            return win32clipboard.GetClipboardSequenceNumber()
+        except Exception:
+            return None
+
+    def _get_selection_spans(self, start, end):
+        """Return [(text, frozenset_of_tags, link_url_or_None)] for the range [start, end)."""
+        content = self._text.get(start, end)
+        if not content:
+            return []
+        spans = []
+        run_text = ""
+        run_tags = None
+        run_link = None
+        start_norm = self._text.index(start)
+        for i, ch in enumerate(content):
+            pos = "%s+%dc" % (start_norm, i)
+            names = self._text.tag_names(pos)
+            inline = frozenset(t for t in names if t in INLINE_TAG_ORDER)
+            link = next((_unescape_html(t[5:]) for t in names if t.startswith("link_")), None)
+            if run_tags is None:
+                run_tags, run_link, run_text = inline, link, ch
+            elif inline == run_tags and link == run_link:
+                run_text += ch
+            else:
+                spans.append((run_text, run_tags, run_link))
+                run_tags, run_link, run_text = inline, link, ch
+        if run_text:
+            spans.append((run_text, run_tags, run_link))
+        return spans
+
+    def _insert_spans_at_cursor(self, spans):
+        """Delete any current selection, then insert formatted spans at the cursor."""
+        if self._readonly:
+            return
+        try:
+            sel = self._text.tag_ranges(tk.SEL)
+            if sel:
+                self._text.delete(sel[0], sel[1])
+        except tk.TclError:
+            pass
+        for text, inline_tags, link_url in spans:
+            if not text:
+                continue
+            pos_start = self._text.index(tk.INSERT)
+            self._text.insert(tk.INSERT, text)
+            pos_end = self._text.index(tk.INSERT)
+            for tag in inline_tags:
+                self._text.tag_add(tag, pos_start, pos_end)
+            if link_url and TAG_LINK in inline_tags:
+                self._text.tag_add("link_%s" % _escape_html(link_url), pos_start, pos_end)
+        self._refresh_derived_tags()
+
+    def _on_copy(self, event=None):
+        sel = self._text.tag_ranges(tk.SEL)
+        if not sel:
+            return "break"
+        start, end = sel[0], sel[1]
+        plain = self._text.get(start, end)
+        spans = self._get_selection_spans(start, end)
+        self._text.clipboard_clear()
+        self._text.clipboard_append(plain)
+        _rich_clipboard["plain"] = plain
+        _rich_clipboard["spans"] = spans
+        _rich_clipboard["seq"] = self._clipboard_seq()
+        return "break"
+
+    def _on_cut(self, event=None):
+        if self._readonly:
+            return "break"
+        sel = self._text.tag_ranges(tk.SEL)
+        if not sel:
+            return "break"
+        self._on_copy()
+        try:
+            sel = self._text.tag_ranges(tk.SEL)
+            if sel:
+                self._text.delete(sel[0], sel[1])
+                self._refresh_derived_tags()
+        except tk.TclError:
+            pass
+        return "break"
+
+    def _on_paste(self, event=None):
+        if self._readonly:
+            return "break"
+        current_seq = self._clipboard_seq()
+        use_rich = (
+            _rich_clipboard["spans"] is not None
+            and _rich_clipboard["seq"] is not None
+            and current_seq is not None
+            and current_seq == _rich_clipboard["seq"]
+        )
+        # Fallback: if sequence numbers unavailable, compare plain text
+        if not use_rich and _rich_clipboard["plain"] is not None:
+            try:
+                use_rich = (self._text.clipboard_get() == _rich_clipboard["plain"]
+                            and _rich_clipboard["spans"] is not None)
+            except tk.TclError:
+                pass
+        if use_rich:
+            self._insert_spans_at_cursor(_rich_clipboard["spans"])
+        else:
+            _rich_clipboard.update({"plain": None, "spans": None, "seq": None})
+            try:
+                text = self._text.clipboard_get()
+            except tk.TclError:
+                return "break"
+            try:
+                sel = self._text.tag_ranges(tk.SEL)
+                if sel:
+                    self._text.delete(sel[0], sel[1])
+            except tk.TclError:
+                pass
+            self._text.insert(tk.INSERT, text)
+        return "break"
 
     def set_readonly(self, value=True):
         self._readonly = bool(value)

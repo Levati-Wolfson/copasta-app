@@ -4,14 +4,14 @@ import threading
 from PIL import Image, ImageDraw
 import pystray
 
+import app_icon
 
-def create_icon_image(size=64):
-    """Create a simple icon for the system tray."""
+
+def _fallback_tray_image(size=64):
+    """Minimal placeholder if Newicon.png is missing."""
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    # Rounded rectangle (steel blue)
     draw.rounded_rectangle([4, 4, size - 4, size - 4], fill=(70, 130, 180), outline=(255, 255, 255), width=2)
-    # Simple "ab" style: two blocks suggesting text
     draw.rectangle([12, 20, 28, 44], fill="white")
     draw.rectangle([36, 20, 52, 44], fill="white")
     return img
@@ -23,7 +23,7 @@ def run_tray(show_callback, quit_callback):
     show_callback: call when user clicks "Show"
     quit_callback: call when user clicks "Quit"
     """
-    icon_image = create_icon_image(64)
+    icon_image = app_icon.load_tray_image(64) or _fallback_tray_image(64)
 
     def on_show(icon, item):
         show_callback()

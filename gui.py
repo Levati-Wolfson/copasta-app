@@ -2,11 +2,13 @@
 import re
 import logging
 import tkinter as tk
+import tkinter.font as tkFont
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 import uuid
 import ctypes
 
+import app_icon
 import data_model
 from rich_editor import RichTextEditor
 
@@ -180,6 +182,7 @@ class PhraseDialog(tk.Toplevel):
         on_save=None,
         get_all_phrases_callback=None,
         require_new_abbreviation=False,
+        font_size_offset=0,
     ):
         """
         phrase_item: None for Add, or dict for Edit.
@@ -208,7 +211,8 @@ class PhraseDialog(tk.Toplevel):
         top.pack(fill=tk.X)
         ttk.Label(top, text="Phrase name / description:").pack(anchor=tk.W)
         self._name_var = tk.StringVar(value=(phrase_item.get("name") if phrase_item else ""))
-        ttk.Entry(top, textvariable=self._name_var, width=60).pack(fill=tk.X, pady=(4, 8))
+        self._name_entry = ttk.Entry(top, textvariable=self._name_var, width=60)
+        self._name_entry.pack(fill=tk.X, pady=(4, 8))
 
         # Abbreviation
         trig_frame = ttk.Labelframe(self, text="Abbreviation", padding="8 4 8 8")
@@ -234,7 +238,7 @@ class PhraseDialog(tk.Toplevel):
         # Rich text editor
         editor_frame = ttk.Labelframe(self, text="Content (rich text)", padding="8 4 8 8")
         editor_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
-        self._editor = RichTextEditor(editor_frame, height=10)
+        self._editor = RichTextEditor(editor_frame, height=10, font_size_offset=font_size_offset)
         self._editor.pack(fill=tk.BOTH, expand=True)
         if phrase_item and phrase_item.get("expansion_html"):
             self._editor.set_html(phrase_item.get("expansion_html"))
@@ -243,6 +247,8 @@ class PhraseDialog(tk.Toplevel):
         self._trigger_var.trace_add("write", lambda *_: self._validate_trigger())
         self._validate_trigger()
         self.after(50, lambda: _center_toplevel_on_parent(self, parent))
+        if not phrase_item:
+            self.after(60, lambda: (self._name_entry.focus_set(), self._name_entry.selection_range(0, tk.END)))
 
     def _is_duplicate_trigger(self, value):
         if not value:
@@ -296,6 +302,7 @@ class PhraseDialog(tk.Toplevel):
                 "expansion_html": expansion_html,
             }
             self._parent_children.append(new_phrase)
+            self._phrase = new_phrase
         if self._on_save:
             self._on_save()
         self._result = True
@@ -324,6 +331,7 @@ class MainWindow:
         self.root.minsize(500, 400)
         self.root.geometry(self._load_geometry())
         self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
+        app_icon.apply_window_icon(self.root)
 
         self._build_ui()
         self._refresh_tree()
@@ -361,6 +369,7 @@ class MainWindow:
 
         # Left: tree + buttons (buttons can wrap to two rows when narrow)
         left = ttk.Frame(paned, width=280)
+        self._left_frame = left
         paned.add(left, weight=0)
         left.pack_propagate(False)  # Prevent frame from shrinking below width
         ttk.Label(left, text="Folders & Phrases", font=("Segoe UI", 10, "bold")).pack(anchor=tk.W)
@@ -389,8 +398,6 @@ class MainWindow:
         self._tree.bind("<Double-1>", self._on_tree_double)
         self._tree.bind("<Delete>", lambda e: self._delete())
         self._tree.bind("<ButtonPress-1>", self._on_tree_click, add="+")
-        self._tree.tag_configure("folder", font=("Segoe UI", 10, "bold"))
-        self._tree.tag_configure("phrase", font=("Segoe UI", 10))
         self._setup_drag_drop()
         self.root.bind("<Escape>", lambda e: self._deselect())
 
@@ -403,11 +410,33 @@ class MainWindow:
         self._preview_sep.pack(fill=tk.X, pady=(2, 4))
         self._preview_abbr_label = ttk.Label(right, text="")
         self._preview_abbr_label.pack(anchor=tk.W, pady=(0, 2))
-        self._preview_editor = RichTextEditor(right, height=20, show_toolbar=False, readonly=True)
+        self._preview_editor = RichTextEditor(right, height=20, show_toolbar=False, readonly=True, font_size_offset=self._get_font_offset())
         self._preview_editor.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
         # Click anywhere on the right panel to deselect
         for widget in (right, self._right_label, self._preview_sep, self._preview_abbr_label):
             widget.bind("<ButtonPress-1>", lambda e: self._deselect())
+        # Apply row height (and any other font-dependent styles) now that the tree exists.
+        self._apply_font_settings()
+
+    def _get_font_offset(self):
+        if not self._get_settings:
+            return 0
+        return {"small": 0, "medium": 2, "large": 4}.get(
+            self._get_settings().get("font_size", "small"), 0
+        )
+
+    def _apply_font_settings(self):
+        off = self._get_font_offset()
+        base = 10 + off
+        self._tree.tag_configure("folder", font=("Segoe UI", base, "bold"))
+        self._tree.tag_configure("phrase", font=("Segoe UI", base))
+        # Row height must be at least the line height of the font plus a little padding.
+        import tkinter.font as tkFont
+        row_height = tkFont.Font(family="Segoe UI", size=base, weight="bold").metrics("linespace") + 4
+        ttk.Style().configure("Treeview", rowheight=row_height)
+        if hasattr(self, "_preview_editor"):
+            self._preview_editor.apply_font_size(off)
+        self._resize_left_panel()
 
     def _refresh_tree(self):
         # Preserve which folders were expanded (tree iids = our item ids)
@@ -431,6 +460,36 @@ class MainWindow:
                 self._tree.item(iid, open=True)
             except tk.TclError:
                 pass
+        self._resize_left_panel()
+
+    def _resize_left_panel(self):
+        """Grow the left tree panel to fit the widest item label."""
+        try:
+            folder_font = tkFont.Font(family="Segoe UI", size=10, weight="bold")
+            phrase_font = tkFont.Font(family="Segoe UI", size=10)
+            try:
+                indent = int(self._tree.tk.call(str(self._tree), "cget", "-indent"))
+            except Exception:
+                indent = 20
+            max_px = 200
+            def measure_items(parent_iid, depth):
+                nonlocal max_px
+                for iid in self._tree.get_children(parent_iid):
+                    data = self._tree.item(iid)
+                    text = data.get("text", "")
+                    tags = data.get("tags", ())
+                    font = folder_font if "folder" in tags else phrase_font
+                    px = depth * indent + font.measure(text) + 48
+                    if px > max_px:
+                        max_px = px
+                    measure_items(iid, depth + 1)
+            measure_items("", 0)
+            screen_w = self.root.winfo_screenwidth()
+            new_width = max(280, min(max_px, screen_w // 2))
+            self._left_frame.configure(width=new_width)
+            self._tree.column("#0", width=new_width - 22, minwidth=150)
+        except Exception:
+            logging.exception("Failed to auto-resize left panel.")
 
     def _insert_item(self, parent_iid, item):
         item_id = item.get("id")
@@ -654,6 +713,8 @@ class MainWindow:
         children.append(folder)
         self._save_data(self._get_data())
         self._refresh_tree()
+        self._tree.selection_set(folder["id"])
+        self._tree.see(folder["id"])
 
     def _rename(self):
         item, children, _ = self._get_selected_item_and_parent()
@@ -666,6 +727,8 @@ class MainWindow:
             item["name"] = name.strip()
             self._save_data(self._get_data())
             self._refresh_tree()
+            self._tree.selection_set(item["id"])
+            self._tree.see(item["id"])
 
     def _delete(self):
         item, children, _ = self._get_selected_item_and_parent()
@@ -687,8 +750,12 @@ class MainWindow:
             parent_folder_children=children,
             on_save=lambda: self._save_and_refresh(),
             get_all_phrases_callback=lambda: data_model.collect_all_phrases(self._get_data().get("children", [])),
+            font_size_offset=self._get_font_offset(),
         )
         self._wait_dialog(d)
+        if getattr(d, "_result", False) and d._phrase:
+            self._tree.selection_set(d._phrase["id"])
+            self._tree.see(d._phrase["id"])
 
     def _edit_phrase(self):
         item, children, _ = self._get_selected_item_and_parent()
@@ -701,8 +768,12 @@ class MainWindow:
             parent_folder_children=children,
             on_save=lambda: self._save_and_refresh(),
             get_all_phrases_callback=lambda: data_model.collect_all_phrases(self._get_data().get("children", [])),
+            font_size_offset=self._get_font_offset(),
         )
         self._wait_dialog(d)
+        if getattr(d, "_result", False):
+            self._tree.selection_set(item["id"])
+            self._tree.see(item["id"])
 
     def _clone_phrase(self):
         item, children, _ = self._get_selected_item_and_parent()
@@ -725,6 +796,7 @@ class MainWindow:
             on_save=lambda: self._save_and_refresh(),
             get_all_phrases_callback=lambda: data_model.collect_all_phrases(self._get_data().get("children", [])),
             require_new_abbreviation=True,
+            font_size_offset=self._get_font_offset(),
         )
         self._wait_dialog(d)
         if not getattr(d, "_result", False):
@@ -829,6 +901,12 @@ class SettingsDialog(tk.Toplevel):
         ttk.Radiobutton(self, text="At mouse cursor location", variable=self._pos_var, value="mouse").pack(anchor=tk.W, padx=8)
         ttk.Radiobutton(self, text="Fixed custom position", variable=self._pos_var, value="fixed").pack(anchor=tk.W, padx=8)
         ttk.Button(self, text="Drag window to set position...", command=self._open_position_picker).pack(anchor=tk.W, padx=8, pady=4)
+
+        ttk.Label(self, text="Font size").pack(anchor=tk.W, padx=8, pady=(12, 4))
+        self._font_size_var = tk.StringVar(value=s.get("font_size", "small"))
+        ttk.Radiobutton(self, text="Small", variable=self._font_size_var, value="small").pack(anchor=tk.W, padx=8)
+        ttk.Radiobutton(self, text="Medium", variable=self._font_size_var, value="medium").pack(anchor=tk.W, padx=8)
+        ttk.Radiobutton(self, text="Large", variable=self._font_size_var, value="large").pack(anchor=tk.W, padx=8)
 
         try:
             import startup
@@ -1015,6 +1093,7 @@ class SettingsDialog(tk.Toplevel):
         s = self._get_settings()
         s["floating_menu_hotkey"] = self._hotkey_var.get().strip() or "ctrl+shift+space"
         s["floating_menu_position"] = self._pos_var.get()
+        s["font_size"] = self._font_size_var.get()
         if self._start_var is not None:
             s["start_with_windows"] = self._start_var.get()
             try:
