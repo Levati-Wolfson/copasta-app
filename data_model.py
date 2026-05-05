@@ -137,10 +137,56 @@ def collect_all_phrases(children):
     return out
 
 
-def collect_auto_triggers(children):
-    """Return dict trigger -> phrase item for all phrases that have an abbreviation set."""
-    result = {}
+def duplicate_trigger_phrase_ids(children):
+    """
+    Phrase ids whose non-empty trigger matches another phrase's trigger.
+    Those phrases are excluded from auto-expand until fixed.
+    """
+    by_trigger = {}
     for p in collect_all_phrases(children):
+        t = (p.get("trigger") or "").strip()
+        if not t:
+            continue
+        by_trigger.setdefault(t, []).append(p.get("id"))
+    bad = set()
+    for ids in by_trigger.values():
+        if len(ids) > 1:
+            bad.update(ids)
+    return bad
+
+
+def duplicate_trigger_ancestor_folder_ids(children):
+    """Folder ids that are ancestors of at least one duplicate-abbreviation phrase."""
+    bad_phrases = duplicate_trigger_phrase_ids(children)
+    if not bad_phrases:
+        return set()
+    folder_ids = set()
+
+    def walk(items, ancestor_folder_stack):
+        for item in items:
+            if item.get("type") == "folder":
+                fid = item.get("id")
+                stack = ancestor_folder_stack + ([fid] if fid else [])
+                walk(item.get("children", []), stack)
+            else:
+                if item.get("id") in bad_phrases:
+                    folder_ids.update(ancestor_folder_stack)
+
+    walk(children, [])
+    return folder_ids
+
+
+def collect_auto_triggers(children):
+    """Return dict trigger -> phrase for phrases with an abbreviation set.
+
+    Phrases involved in duplicate abbreviations are omitted so typing the trigger
+    does not paste until the conflict is resolved.
+    """
+    result = {}
+    skip_ids = duplicate_trigger_phrase_ids(children)
+    for p in collect_all_phrases(children):
+        if p.get("id") in skip_ids:
+            continue
         t = (p.get("trigger") or "").strip()
         if t:
             result[t] = p

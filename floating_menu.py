@@ -1,5 +1,4 @@
 """Global floating phrase menu: borderless popup, cascade, hover preview, pin."""
-import re
 import logging
 import tkinter as tk
 import tkinter.font as tkFont
@@ -7,14 +6,7 @@ import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 
 import app_icon
-
-
-def _strip_html(html):
-    if not html:
-        return ""
-    text = re.sub(r"<[^>]+>", "", html)
-    text = text.replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
-    return text.strip()[:200]
+from rich_editor import RichTextEditor
 
 
 class FloatingMenu:
@@ -33,6 +25,7 @@ class FloatingMenu:
         self._close_timers = {}  # level -> after id (for cascade close grace period)
         self._preview_timer = None
         self._preview_win = None
+        self._post_list_leave_timer = None
         self._cascade_levels = {}  # level>=1 -> {"win","listbox","items"}
         self._drag_pos = None
         self._drag_started = False
@@ -46,6 +39,8 @@ class FloatingMenu:
         if self._root is not None:
             return
         self._root = tk.Toplevel()
+        # Distinct from main window title so taskbar / second-instance activation finds the dashboard.
+        self._root.title("Copasta — Phrases")
         app_icon.apply_window_icon(self._root)
         self._root.overrideredirect(True)
         self._root.attributes("-topmost", True)
@@ -108,6 +103,7 @@ class FloatingMenu:
     def _bind_listbox(self, listbox, level):
         listbox.bind("<Button-1>", lambda e, lv=level: self._on_list_click(lv, e))
         listbox.bind("<Motion>", lambda e, lv=level: self._on_list_motion(lv, e))
+        listbox.bind("<Enter>", lambda e, lv=level: self._on_list_enter(lv, e))
         listbox.bind("<Leave>", lambda e, lv=level: self._on_list_leave(lv, e))
 
     def _toggle_pin(self):
@@ -190,6 +186,66 @@ class FloatingMenu:
                 logging.exception("Failed to cancel floating menu preview timer.")
             self._preview_timer = None
 
+    def _cancel_post_list_leave_timer(self):
+        tid = self._post_list_leave_timer
+        self._post_list_leave_timer = None
+        if tid and self._root:
+            try:
+                self._root.after_cancel(tid)
+            except Exception:
+                logging.exception("Failed to cancel post-list-leave timer.")
+
+    def _schedule_post_list_leave(self):
+        """After leaving list/preview, hide preview only if the cursor is not over the preview box."""
+        self._cancel_post_list_leave_timer()
+        if not self._root:
+            return
+        self._post_list_leave_timer = self._root.after(280, self._on_post_list_leave_hide_preview)
+
+    def _on_post_list_leave_hide_preview(self):
+        self._post_list_leave_timer = None
+        if not self._preview_win:
+            return
+        try:
+            px, py = self._root.winfo_pointerxy()
+            w = self._root.winfo_containing(px, py)
+        except tk.TclError:
+            w = None
+        if w is not None:
+            try:
+                if w.winfo_toplevel() == self._preview_win:
+                    return
+            except tk.TclError:
+                pass
+        self._hide_preview()
+
+    def _on_list_enter(self, level, event):
+        self._cancel_post_list_leave_timer()
+
+    def _on_preview_mouse_enter(self, event):
+        """Keep cascades and preview open while scrolling inside the rich-text preview."""
+        self._cancel_post_list_leave_timer()
+        for lv in list(self._close_timers.keys()):
+            self._cancel_close_timer(lv)
+
+    def _bind_preview_enter_recursive(self, widget):
+        widget.bind("<Enter>", self._on_preview_mouse_enter, add="+")
+        try:
+            for ch in widget.winfo_children():
+                self._bind_preview_enter_recursive(ch)
+        except tk.TclError:
+            pass
+
+    def _on_preview_win_leave(self, event):
+        if not self._preview_win:
+            return
+        x, y = event.x_root, event.y_root
+        wx, wy = self._preview_win.winfo_rootx(), self._preview_win.winfo_rooty()
+        ww, wh = self._preview_win.winfo_width(), self._preview_win.winfo_height()
+        if wx <= x < wx + ww and wy <= y < wy + wh:
+            return
+        self._schedule_post_list_leave()
+
     def _close_cascades_from(self, start_level):
         for lv in [l for l in list(self._close_timers.keys()) if l >= start_level]:
             self._cancel_close_timer(lv)
@@ -249,7 +305,7 @@ class FloatingMenu:
     def _on_list_leave(self, level, event):
         self._cancel_hover_timer(level)
         self._cancel_preview_timer()
-        self._hide_preview()
+        self._schedule_post_list_leave()
         self._hover_indices.pop(level, None)
         # Schedule close of the child cascade after a grace period so that a
         # momentary slip of the cursor doesn't immediately dismiss it.
@@ -275,6 +331,7 @@ class FloatingMenu:
 
     def _on_cascade_enter(self, level, event):
         """Cursor entered the cascade window — cancel pending close for this and all parent levels."""
+        self._cancel_post_list_leave_timer()
         for lv in range(1, level + 1):
             self._cancel_close_timer(lv)
 
@@ -404,25 +461,39 @@ class FloatingMenu:
             y = win.winfo_rooty() + 20
         x = win.winfo_rootx() + win.winfo_width() + 8
         self._hide_preview()
-        text = _strip_html(phrase_item.get("expansion_html") or "")
-        if not text:
-            return
+        html = (phrase_item.get("expansion_html") or "").strip()
         self._preview_win = tk.Toplevel(self._root)
         self._preview_win.overrideredirect(True)
         self._preview_win.attributes("-topmost", True)
         self._preview_win.configure(bg="#1a1a1a", highlightthickness=1, highlightbackground="#555555")
-        lbl = tk.Label(
-            self._preview_win,
-            text=text,
-            font=("Segoe UI", 9 + self._font_offset()),
+        outer = tk.Frame(self._preview_win, bg="#1a1a1a", padx=8, pady=8)
+        outer.pack(fill=tk.BOTH, expand=True)
+        abbr = (phrase_item.get("trigger") or "").strip()
+        abbr_line = "Abbreviation: %s" % abbr if abbr else "Abbreviation: (none)"
+        ab_font = ("Segoe UI", 9 + self._font_offset())
+        tk.Label(
+            outer,
+            text=abbr_line,
+            font=ab_font,
             bg="#1a1a1a",
-            fg="#dddddd",
-            wraplength=280,
+            fg="#c8c8c8",
+            anchor=tk.W,
             justify=tk.LEFT,
-            padx=8,
-            pady=6,
+            wraplength=300,
+        ).pack(anchor=tk.W, fill=tk.X, pady=(0, 6))
+        preview = RichTextEditor(
+            outer,
+            height=14,
+            show_toolbar=False,
+            readonly=True,
+            font_size_offset=self._font_offset(),
+            text_width=42,
         )
-        lbl.pack(fill=tk.BOTH, expand=True)
+        preview.pack(fill=tk.BOTH, expand=True)
+        preview.set_html(html if html else "<p></p>")
+        preview.set_readonly(True)
+        self._preview_win.bind("<Leave>", self._on_preview_win_leave)
+        self._bind_preview_enter_recursive(self._preview_win)
         self._preview_win.geometry("+%d+%d" % (x, y))
         self._preview_win.update_idletasks()
         pw = self._preview_win.winfo_width()
@@ -474,6 +545,7 @@ class FloatingMenu:
         return x, y
 
     def _hide_preview(self):
+        self._cancel_post_list_leave_timer()
         if self._preview_win:
             try:
                 self._preview_win.destroy()
@@ -626,6 +698,7 @@ class FloatingMenu:
 
     def _hide(self):
         self._cancel_preview_timer()
+        self._cancel_post_list_leave_timer()
         for level in list(self._hover_timers.keys()):
             self._cancel_hover_timer(level)
         for level in list(self._close_timers.keys()):
@@ -643,6 +716,7 @@ class FloatingMenu:
 
     def destroy(self):
         self._cancel_preview_timer()
+        self._cancel_post_list_leave_timer()
         for level in list(self._hover_timers.keys()):
             self._cancel_hover_timer(level)
         for level in list(self._close_timers.keys()):

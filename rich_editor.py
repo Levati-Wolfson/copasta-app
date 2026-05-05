@@ -119,10 +119,11 @@ def _ask_hyperlink_dialog(parent, initial_url):
 class RichTextEditor(ttk.Frame):
     """Frame containing toolbar + Text with tags. get_html() returns HTML fragment."""
 
-    def __init__(self, parent, height=12, show_toolbar=True, readonly=False, font_size_offset=0, **kwargs):
+    def __init__(self, parent, height=12, show_toolbar=True, readonly=False, font_size_offset=0, text_width=None, **kwargs):
         super().__init__(parent, **kwargs)
         self._height = height
         self._readonly = bool(readonly)
+        self._text_width = text_width
         self._link_url = tk.StringVar(value="https://")
         self._link_tooltip = None
         self._link_tooltip_text = ""
@@ -194,8 +195,7 @@ class RichTextEditor(ttk.Frame):
         text_frame = ttk.Frame(self)
         text_frame.pack(fill=tk.BOTH, expand=True)
         # Manually style Text widget for dark mode
-        self._text = tk.Text(
-            text_frame,
+        text_kw = dict(
             wrap=tk.WORD,
             height=self._height,
             font=("Segoe UI", 10 + self._font_offset),
@@ -207,6 +207,12 @@ class RichTextEditor(ttk.Frame):
             insertbackground="#ffffff",
             selectbackground="#505050",
             selectforeground="#ffffff",
+        )
+        if self._text_width is not None:
+            text_kw["width"] = int(self._text_width)
+        self._text = tk.Text(
+            text_frame,
+            **text_kw,
         )
         scroll = ttk.Scrollbar(text_frame)
         self._text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)

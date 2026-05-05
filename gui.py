@@ -1,7 +1,12 @@
 """Main GUI: folder tree (Treeview), phrase list, add/edit phrase dialog, settings."""
-import re
+import copy
+import json
 import logging
+import os
+import re
+import subprocess
 import tkinter as tk
+from tkinter import filedialog
 import tkinter.font as tkFont
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
@@ -15,6 +20,96 @@ from rich_editor import RichTextEditor
 
 def _new_id():
     return str(uuid.uuid4())
+
+
+def _downloads_folder():
+    d = os.path.join(os.path.expanduser("~"), "Downloads")
+    return d if os.path.isdir(d) else os.path.expanduser("~")
+
+
+def _sanitize_export_filename_part(name):
+    """Strip characters illegal in Windows filenames; keep it reasonably short."""
+    s = (name or "").strip() or "phrase"
+    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", s)
+    s = s.strip(" .") or "phrase"
+    return s[:80]
+
+
+def _parse_import_file(path):
+    """
+    Load export JSON. Returns either:
+    - {"mode": "tree", "items": [...]}  (v2: folders + phrases, nested)
+    - {"mode": "flat", "phrases": [...]}  (legacy: phrase list only)
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, dict):
+        items = data.get("items")
+        if isinstance(items, list):
+            if len(items) > 0:
+                for i, it in enumerate(items):
+                    if not isinstance(it, dict) or it.get("type") not in ("folder", "phrase"):
+                        raise ValueError("Invalid entry at index %d in items (expected folder or phrase)." % i)
+                return {"mode": "tree", "items": items}
+            # empty items array — fall through and try legacy "phrases" etc.
+        if "phrases" in data:
+            raw = data["phrases"]
+        elif data.get("type") == "phrase":
+            raw = [data]
+        else:
+            raise ValueError("This file does not look like a Copasta export (expected items or phrases).")
+    elif isinstance(data, list):
+        if not data:
+            raise ValueError("Empty list in file.")
+        if all(isinstance(x, dict) and x.get("type") == "phrase" for x in data):
+            raw = data
+        elif all(isinstance(x, dict) and x.get("type") in ("folder", "phrase") for x in data):
+            return {"mode": "tree", "items": data}
+        else:
+            raise ValueError("Unrecognized list format in file.")
+    else:
+        raise ValueError("Unrecognized JSON structure.")
+    if not isinstance(raw, list):
+        raise ValueError("Invalid phrases list in file.")
+    out = []
+    for x in raw:
+        if isinstance(x, dict) and x.get("type") == "phrase":
+            out.append(x)
+    if not out:
+        raise ValueError("No phrases found in this file.")
+    return {"mode": "flat", "phrases": out}
+
+
+def _clone_tree_new_ids(node):
+    """Deep clone a folder/phrase subtree with fresh UUIDs on every node."""
+    n = copy.deepcopy(node)
+    n["id"] = _new_id()
+    if n.get("type") == "folder":
+        data_model._ensure_folder(n)
+        n["children"] = [_clone_tree_new_ids(ch) for ch in (n.get("children") or [])]
+        return n
+    data_model._ensure_phrase(n)
+    return n
+
+
+def _open_explorer_select(path):
+    """Windows: open a folder window with the given file selected.
+
+    Path must be passed as its own argv after ``/select,`` — if it is concatenated
+    onto ``/select,``, paths with spaces get one big quoted token and Explorer
+    mis-parses it (often opening Documents instead of the exe folder).
+    """
+    path = os.path.normpath(os.path.abspath(path))
+    if not os.path.isfile(path):
+        return
+    try:
+        subprocess.run(
+            ["explorer", "/select,", path],
+            check=False,
+            shell=False,
+        )
+    except Exception:
+        logging.exception("Failed to open Explorer for exported file.")
 
 
 def apply_dark_titlebar(window):
@@ -324,6 +419,8 @@ class MainWindow:
         self._on_close = on_close_callback
         self._on_settings = on_settings_callback
         self._on_quit = on_quit_callback
+        self._dup_ab_phrase_ids = set()
+        self._dup_ab_folder_ids = set()
 
         # Use ttkbootstrap Window with modern dark theme
         self.root = ttk.Window(themename="darkly")
@@ -346,6 +443,7 @@ class MainWindow:
         
         # File menu
         file_menubutton = ttk.Menubutton(menu_frame, text="File")
+        self._file_menubutton = file_menubutton
         file_menubutton.pack(side=tk.LEFT, padx=2)
         file_menu = tk.Menu(
             file_menubutton,
@@ -362,6 +460,13 @@ class MainWindow:
         file_menu.add_command(label="Minimize to tray", command=self._on_window_close)
         file_menu.add_command(label="Quit", command=self._quit)
         file_menubutton.config(menu=file_menu)
+        self._dup_banner = ttk.Label(
+            menu_frame,
+            text="",
+            bootstyle="danger",
+            wraplength=520,
+            justify=tk.LEFT,
+        )
         
         # Paned: left tree, right content (with visible sash/separator)
         paned = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
@@ -380,15 +485,23 @@ class MainWindow:
         btn_row1.pack(fill=tk.X)
         btn_row2 = ttk.Frame(btn_container)
         btn_row2.pack(fill=tk.X, pady=(2, 0))
+        btn_row3 = ttk.Frame(btn_container)
+        btn_row3.pack(fill=tk.X, pady=(2, 0))
         ttk.Button(btn_row1, text="New Folder", command=self._new_folder, bootstyle="info").pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(btn_row1, text="Rename", command=self._rename, bootstyle="warning").pack(side=tk.LEFT, padx=(0, 4))
+        self._rename_btn = ttk.Button(btn_row1, text="Rename", command=self._rename, bootstyle="warning")
+        self._rename_btn.pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(btn_row1, text="Delete", command=self._delete, bootstyle="danger").pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(btn_row2, text="Add Phrase", command=self._add_phrase, bootstyle="success").pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(btn_row2, text="Edit Phrase", command=self._edit_phrase, bootstyle="primary").pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(btn_row2, text="Clone Phrase", command=self._clone_phrase, bootstyle="secondary").pack(side=tk.LEFT)
+        self._edit_btn = ttk.Button(btn_row2, text="Edit Phrase", command=self._edit_phrase, bootstyle="primary")
+        self._edit_btn.pack(side=tk.LEFT, padx=(0, 4))
+        self._clone_btn = ttk.Button(btn_row2, text="Clone Phrase", command=self._clone_phrase, bootstyle="secondary")
+        self._clone_btn.pack(side=tk.LEFT)
+        ttk.Button(btn_row3, text="Import", command=self._import_phrases, bootstyle="secondary").pack(side=tk.LEFT, padx=(0, 4))
+        self._export_btn = ttk.Button(btn_row3, text="Export", command=self._export_phrases, bootstyle="secondary")
+        self._export_btn.pack(side=tk.LEFT)
         tree_frame = ttk.Frame(left)
         tree_frame.pack(fill=tk.BOTH, expand=True, pady=4)
-        self._tree = ttk.Treeview(tree_frame, show="tree", height=18, selectmode="browse")
+        self._tree = ttk.Treeview(tree_frame, show="tree", height=18, selectmode="extended")
         tree_scroll = ttk.Scrollbar(tree_frame)
         self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -399,6 +512,7 @@ class MainWindow:
         self._tree.bind("<Delete>", lambda e: self._delete())
         self._tree.bind("<ButtonPress-1>", self._on_tree_click, add="+")
         self._setup_drag_drop()
+        self._tree.tag_configure("dup_abbr", background="#6e2222", foreground="#ffffff")
         self.root.bind("<Escape>", lambda e: self._deselect())
 
         # Right: phrase preview (manually styled for dark mode)
@@ -417,6 +531,7 @@ class MainWindow:
             widget.bind("<ButtonPress-1>", lambda e: self._deselect())
         # Apply row height (and any other font-dependent styles) now that the tree exists.
         self._apply_font_settings()
+        self._update_selection_dependent_buttons()
 
     def _get_font_offset(self):
         if not self._get_settings:
@@ -439,6 +554,15 @@ class MainWindow:
         self._resize_left_panel()
 
     def _refresh_tree(self):
+        # Clear selection first: deleting/rebuilding rows while an iid stays selected
+        # can leave the Treeview in a bad state (stale row / "ghost" items on screen).
+        try:
+            sel = self._tree.selection()
+            if sel:
+                self._tree.selection_remove(*sel)
+        except tk.TclError:
+            pass
+        self._recompute_duplicate_abbrev_metadata()
         # Preserve which folders were expanded (tree iids = our item ids)
         expanded_iids = set()
         def collect_expanded(parent_iid):
@@ -461,6 +585,29 @@ class MainWindow:
             except tk.TclError:
                 pass
         self._resize_left_panel()
+        self._tree.update_idletasks()
+        self._update_duplicate_banner()
+        self._update_selection_dependent_buttons()
+
+    def _recompute_duplicate_abbrev_metadata(self):
+        root = self._get_data().get("children", [])
+        self._dup_ab_phrase_ids = data_model.duplicate_trigger_phrase_ids(root)
+        self._dup_ab_folder_ids = data_model.duplicate_trigger_ancestor_folder_ids(root)
+
+    def _update_duplicate_banner(self):
+        if not getattr(self, "_dup_banner", None):
+            return
+        if self._dup_ab_phrase_ids:
+            self._dup_banner.config(
+                text=(
+                    "Multiple phrases with the same abbreviation detected. Please change them "
+                    "(highlighted in the list). No two phrases can have the same abbreviation."
+                )
+            )
+            self._dup_banner.pack_forget()
+            self._dup_banner.pack(side=tk.LEFT, padx=(10, 8), pady=2, after=self._file_menubutton)
+        else:
+            self._dup_banner.pack_forget()
 
     def _resize_left_panel(self):
         """Grow the left tree panel to fit the widest item label."""
@@ -495,12 +642,18 @@ class MainWindow:
         item_id = item.get("id")
         if item.get("type") == "folder":
             name = item.get("name") or "New Folder"
-            iid = self._tree.insert(parent_iid, tk.END, iid=item_id, text="\U0001f4c1 " + name, tags=("folder",))
+            tags = ["folder"]
+            if item_id in getattr(self, "_dup_ab_folder_ids", ()):
+                tags.append("dup_abbr")
+            iid = self._tree.insert(parent_iid, tk.END, iid=item_id, text="\U0001f4c1 " + name, tags=tuple(tags))
             for child in item.get("children", []):
                 self._insert_item(iid, child)
         else:
             name = item.get("name") or "(no name)"
-            iid = self._tree.insert(parent_iid, tk.END, iid=item_id, text="\U0001f4c4 " + name, tags=("phrase",))
+            tags = ["phrase"]
+            if item_id in getattr(self, "_dup_ab_phrase_ids", ()):
+                tags.append("dup_abbr")
+            iid = self._tree.insert(parent_iid, tk.END, iid=item_id, text="\U0001f4c4 " + name, tags=tuple(tags))
 
     def _setup_drag_drop(self):
         self._drag_iid = None
@@ -512,7 +665,7 @@ class MainWindow:
         self._drop_line.overrideredirect(True)
         self._drop_line.configure(bg="#ffffff")
         self._drop_line.withdraw()
-        self._tree.bind("<ButtonPress-1>", self._on_drag_start)
+        self._tree.bind("<ButtonPress-1>", self._on_drag_start, add="+")
         self._tree.bind("<B1-Motion>", self._on_drag_motion)
         self._tree.bind("<ButtonRelease-1>", self._on_drag_end)
         self._tree.bind("<Leave>", self._on_drag_leave)
@@ -567,6 +720,7 @@ class MainWindow:
         self._drag_iid = self._tree.identify_row(ty)
         if not self._drag_iid:
             self._drag_iid = None
+            self._deselect()
 
     def _on_drag_motion(self, event):
         if self._drag_iid is None:
@@ -634,12 +788,151 @@ class MainWindow:
         self._drag_iid = None
 
     def _deselect(self):
-        self._tree.selection_set([])
+        try:
+            sel = self._tree.selection()
+            if sel:
+                self._tree.selection_remove(*sel)
+        except tk.TclError:
+            pass
+        self._update_selection_dependent_buttons()
 
     def _on_tree_click(self, event):
         """Deselect when clicking on empty space in the tree."""
         if not self._tree.identify_row(event.y):
             self._deselect()
+
+    def _selected_phrases_in_tree_order(self):
+        """All currently selected items that are phrases, in top-to-bottom tree order."""
+        sel = set(self._tree.selection())
+        if not sel:
+            return []
+        ordered = []
+
+        def walk(children):
+            for item in children:
+                if item.get("type") == "phrase" and item.get("id") in sel:
+                    ordered.append(item)
+                elif item.get("type") == "folder":
+                    walk(item.get("children", []))
+
+        walk(self._get_data().get("children", []))
+        return ordered
+
+    def _selected_export_roots(self):
+        """Selected nodes that are not under another selected node (each becomes an export root)."""
+        sel = set(self._tree.selection())
+        if not sel:
+            return []
+        roots = []
+
+        def walk(children, path_ids):
+            for item in children:
+                iid = item.get("id")
+                path_here = path_ids + [iid]
+                if iid in sel:
+                    sel_anc = [x for x in path_ids if x in sel]
+                    if not sel_anc:
+                        roots.append(item)
+                if item.get("type") == "folder":
+                    walk(item.get("children", []), path_here)
+
+        walk(self._get_data().get("children", []), [])
+        return roots
+
+    def _update_selection_dependent_buttons(self):
+        """Enable/disable toolbar buttons based on selection count and types."""
+        if not getattr(self, "_export_btn", None):
+            return
+        sel = self._tree.selection()
+        n = len(sel)
+        single = n == 1
+        if self._rename_btn:
+            self._rename_btn.config(state=tk.NORMAL if single else tk.DISABLED)
+        one_phrase = False
+        if single:
+            item = self._get_selected_item_and_parent()[0]
+            one_phrase = bool(item and item.get("type") == "phrase")
+        if self._edit_btn:
+            self._edit_btn.config(state=tk.NORMAL if one_phrase else tk.DISABLED)
+        if self._clone_btn:
+            self._clone_btn.config(state=tk.NORMAL if one_phrase else tk.DISABLED)
+        export_roots = self._selected_export_roots()
+        self._export_btn.config(state=tk.NORMAL if export_roots else tk.DISABLED)
+
+    def _export_phrases(self):
+        roots = self._selected_export_roots()
+        if not roots:
+            _show_info_dialog(self.root, "Export", "Nothing selected to export.")
+            return
+        out_dir = data_model._resolve_data_dir()
+        os.makedirs(out_dir, exist_ok=True)
+        if len(roots) == 1:
+            base = "Exported " + _sanitize_export_filename_part(roots[0].get("name"))
+        else:
+            base = "Exported Items"
+        dest = os.path.join(out_dir, base + ".json")
+        n = 1
+        while os.path.exists(dest):
+            n += 1
+            dest = os.path.join(out_dir, "%s (%d).json" % (base, n))
+        payload = {
+            "export_version": 2,
+            "app": "copasta",
+            "items": [copy.deepcopy(r) for r in roots],
+        }
+        try:
+            with open(dest, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+        except OSError:
+            logging.exception("Failed writing phrase export file.")
+            _show_info_dialog(self.root, "Export", "Could not write the export file.")
+            return
+        _open_explorer_select(dest)
+
+    def _import_phrases(self):
+        path = filedialog.askopenfilename(
+            parent=self.root,
+            title="Import",
+            initialdir=_downloads_folder(),
+            filetypes=[("Copasta export", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            parsed = _parse_import_file(path)
+        except (OSError, json.JSONDecodeError, ValueError) as e:
+            msg = str(e) if str(e) else type(e).__name__
+            _show_info_dialog(self.root, "Import", "Could not read this file.\n\n%s" % msg)
+            return
+        target_list, _ = self._get_import_target_list()
+        new_ids = []
+
+        def collect_ids(node):
+            ids = [node.get("id")]
+            if node.get("type") == "folder":
+                for ch in node.get("children", []):
+                    ids.extend(collect_ids(ch))
+            return [x for x in ids if x]
+
+        if parsed["mode"] == "tree":
+            for src in parsed["items"]:
+                cloned = _clone_tree_new_ids(src)
+                target_list.append(cloned)
+                new_ids.extend(collect_ids(cloned))
+        else:
+            for src in parsed["phrases"]:
+                p = copy.deepcopy(src)
+                p["id"] = _new_id()
+                data_model._ensure_phrase(p)
+                target_list.append(p)
+                new_ids.append(p["id"])
+        self._save_data(self._get_data())
+        self._refresh_tree()
+        if len(new_ids) == 1:
+            self._tree.selection_set(new_ids[0])
+            self._tree.see(new_ids[0])
+        elif new_ids:
+            self._tree.selection_set(*new_ids)
 
     def _get_selected_item_and_parent(self):
         sel = self._tree.selection()
@@ -661,8 +954,14 @@ class MainWindow:
         return None, None, None
 
     def _on_tree_select(self, event):
-        item, _, _ = self._get_selected_item_and_parent()
-        if item and item.get("type") == "phrase":
+        self._update_selection_dependent_buttons()
+        phrases = self._selected_phrases_in_tree_order()
+        if len(phrases) >= 2:
+            self._right_label.config(text="%d phrases selected" % len(phrases))
+            self._preview_abbr_label.config(text="")
+            self._preview_editor.set_html("")
+        elif len(phrases) == 1:
+            item = phrases[0]
             html = item.get("expansion_html") or ""
             trig = (item.get("trigger") or "").strip()
             self._right_label.config(text="Phrase Preview")
@@ -678,26 +977,40 @@ class MainWindow:
         if item and item.get("type") == "phrase":
             self._edit_phrase()
 
-    def _get_current_folder_children(self):
-        """Return (list to add to, parent folder or None for root). If a folder is selected, return its children (so we add inside it)."""
-        sel = self._tree.selection()
-        if not sel:
-            data = self._get_data()
-            return data.get("children", []), None
-        iid = sel[0]
+    def _get_import_target_list(self):
+        """
+        List to append new items to (phrases on import, phrases on Add Phrase, folders on
+        New Folder). Uses the first selected row in depth-first tree order: a folder means
+        add inside that folder; a phrase means add in the same list as that phrase. No
+        selection means root.
+        """
         data = self._get_data()
-        item, children, _ = self._find_item_by_iid(data.get("children", []), "", iid)
-        if not item:
-            return data.get("children", []), None
-        if item.get("type") == "folder":
-            return item.get("children", []), item
-        parent_iid = self._tree.parent(iid)
-        if parent_iid == "":
-            return data.get("children", []), None
-        parent_item, _, _ = self._find_item_by_iid(data.get("children", []), "", parent_iid)
-        if not parent_item:
-            return data.get("children", []), None
-        return parent_item.get("children", []), parent_item
+        root = data.get("children", [])
+        sel = set(self._tree.selection())
+        if not sel:
+            return root, None
+
+        def first_selected(children):
+            for item in children:
+                if item.get("id") in sel:
+                    return item
+                if item.get("type") == "folder":
+                    hit = first_selected(item.get("children", []))
+                    if hit is not None:
+                        return hit
+            return None
+
+        hit = first_selected(root)
+        if hit is None:
+            return root, None
+        if hit.get("type") == "folder":
+            return hit.setdefault("children", []), hit
+        _, lst, _ = self._find_item_by_iid(root, "", hit.get("id"))
+        return lst if lst is not None else root, None
+
+    def _get_current_folder_children(self):
+        """Return (list to add to, parent folder or None). Same depth-first rule as Import Phrase."""
+        return self._get_import_target_list()
 
     def _new_folder(self):
         children, _ = self._get_current_folder_children()
@@ -730,15 +1043,44 @@ class MainWindow:
             self._tree.selection_set(item["id"])
             self._tree.see(item["id"])
 
+    def _selected_items_deepest_first(self):
+        """Selected folders/phrases as (item, parent_list), deepest in tree first for safe removal."""
+        sel = set(self._tree.selection())
+        if not sel:
+            return []
+        acc = []
+
+        def walk(children, depth):
+            for item in children:
+                if item.get("id") in sel:
+                    acc.append((depth, item, children))
+                if item.get("type") == "folder":
+                    walk(item.get("children", []), depth + 1)
+
+        walk(self._get_data().get("children", []), 0)
+        acc.sort(key=lambda t: -t[0])
+        return [(item, lst) for _, item, lst in acc]
+
     def _delete(self):
-        item, children, _ = self._get_selected_item_and_parent()
-        if not item:
+        pairs = self._selected_items_deepest_first()
+        if not pairs:
             _show_info_dialog(self.root, "Delete", "Select a folder or phrase first.")
             return
-        name = item.get("name") or "this item"
-        if not _ask_yesno_dialog(self.root, "Delete", "Delete \u2018%s\u2019?" % name):
+        n = len(pairs)
+        labels = []
+        for item, _ in pairs[:15]:
+            kind = "folder" if item.get("type") == "folder" else "phrase"
+            nm = item.get("name") or ("(no name)" if kind == "phrase" else "folder")
+            labels.append("\u2018%s\u2019 (%s)" % (nm, kind))
+        more = "" if n <= 15 else "\n... and %d more." % (n - 15)
+        body = "Delete %d item(s)?\n\n%s%s" % (n, "\n".join(labels), more)
+        if not _ask_yesno_dialog(self.root, "Delete", body):
             return
-        children.remove(item)
+        for item, lst in pairs:
+            for i, x in enumerate(lst):
+                if x is item:
+                    lst.pop(i)
+                    break
         self._save_data(self._get_data())
         self._refresh_tree()
 

@@ -10,6 +10,40 @@ from pynput.keyboard import Controller, Key
 
 CF_HTML = None
 
+_user32 = ctypes.windll.user32
+_VK_LSHIFT = 0xA0
+_VK_RSHIFT = 0xA1
+
+
+def _physical_shift_down():
+    """True if either Shift key is currently held (GetAsyncKeyState)."""
+    return bool(
+        (_user32.GetAsyncKeyState(_VK_LSHIFT) & 0x8000)
+        or (_user32.GetAsyncKeyState(_VK_RSHIFT) & 0x8000)
+    )
+
+
+def _ensure_shift_released_before_ctrl_v():
+    """
+    Triggers that end with Shift (capital letters, !, etc.) often leave Shift
+    down briefly. Many apps map Ctrl+Shift+V to 'paste without formatting',
+    so a plain Ctrl+V paste becomes plain text and loses line breaks / HTML.
+    Wait for Shift to go up, then synthesize Shift release if still down.
+    """
+    deadline = time.perf_counter() + 0.5
+    while _physical_shift_down() and time.perf_counter() < deadline:
+        time.sleep(0.006)
+    if not _physical_shift_down():
+        return
+    ctrl = Controller()
+    try:
+        # Key.shift is left Shift (0xA0); Key.shift_r is right (0xA1).
+        ctrl.release(Key.shift)
+        ctrl.release(Key.shift_r)
+    except Exception:
+        logging.debug("paste: synthetic Shift release failed", exc_info=True)
+    time.sleep(0.02)
+
 
 def _get_cf_html():
     global CF_HTML
@@ -195,6 +229,7 @@ def paste_rich_text(html_fragment):
                     logging.exception("Failed fallback typing plain text expansion.")
                 return
             time.sleep(0.02)
+            _ensure_shift_released_before_ctrl_v()
             ctrl = Controller()
             ctrl.press(Key.ctrl)
             ctrl.press("v")
