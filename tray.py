@@ -17,11 +17,12 @@ def _fallback_tray_image(size=64):
     return img
 
 
-def run_tray(show_callback, quit_callback):
+def run_tray(show_callback, quit_callback, check_for_updates_callback=None):
     """
     Run system tray icon in a separate thread.
     show_callback: call when user clicks "Show"
     quit_callback: call when user clicks "Quit"
+    check_for_updates_callback: optional; if provided, adds "Check for updates..." item
     """
     icon_image = app_icon.load_tray_image(64) or _fallback_tray_image(64)
 
@@ -32,10 +33,15 @@ def run_tray(show_callback, quit_callback):
         quit_callback()
         icon.stop()
 
-    menu = pystray.Menu(
-        pystray.MenuItem("Show", on_show, default=True),
-        pystray.MenuItem("Quit", on_quit),
-    )
+    def on_check_for_updates(icon, item):
+        if check_for_updates_callback is not None:
+            check_for_updates_callback()
+
+    menu_items = [pystray.MenuItem("Show", on_show, default=True)]
+    if check_for_updates_callback is not None:
+        menu_items.append(pystray.MenuItem("Check for updates...", on_check_for_updates))
+    menu_items.append(pystray.MenuItem("Quit", on_quit))
+    menu = pystray.Menu(*menu_items)
     icon = pystray.Icon("Copasta", icon_image, "Copasta", menu)
 
     def run():

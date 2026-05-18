@@ -7,7 +7,7 @@ import os
 import logging
 import ctypes
 
-APP_VERSION = "1.0.0"
+from _version import __version__ as APP_VERSION
 
 _SINGLE_INSTANCE_MUTEX = None  # held for process lifetime to block second instances
 
@@ -36,6 +36,7 @@ import gui
 import tray
 import clipboard_paste
 import floating_menu
+import updater
 
 
 def _setup_logging():
@@ -103,6 +104,17 @@ def main():
 
     register_floating_hotkey()
 
+    settings_io = updater.SettingsIO(get_settings, lambda s: data_model.save_data(data))
+
+    def check_for_updates_now():
+        """User-initiated update check (from menu or tray)."""
+        updater.check_now_interactive(
+            dashboard.root,
+            APP_VERSION,
+            settings_io,
+            on_update_quit_app=lambda: quit_app(),
+        )
+
     # Main window
     dashboard = gui.MainWindow(
         get_data,
@@ -112,9 +124,22 @@ def main():
         on_close_callback=lambda: dashboard.hide(),
         on_settings_callback=None,
         on_quit_callback=lambda: quit_app(),
+        on_check_for_updates_callback=lambda: check_for_updates_now(),
+        app_version=APP_VERSION,
     )
     if start_minimized:
         dashboard.root.after(0, dashboard.hide)
+
+    # Silent background update check 2s after launch (UI is up by then).
+    dashboard.root.after(
+        2000,
+        lambda: updater.check_in_background(
+            dashboard.root,
+            APP_VERSION,
+            settings_io,
+            on_update_quit_app=lambda: quit_app(),
+        ),
+    )
 
     def open_settings():
         # Disable floating window hotkey while settings are open
@@ -211,7 +236,9 @@ def main():
         dashboard.root.after(0, do_quit)
 
     dashboard._on_close = lambda: dashboard.hide()
-    tray_icon = tray.run_tray(show_window, quit_app)
+    tray_icon = tray.run_tray(
+        show_window, quit_app, check_for_updates_callback=check_for_updates_now,
+    )
 
     dashboard.run()
 

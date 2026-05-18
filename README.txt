@@ -68,7 +68,22 @@ Persistence
 
 System tray
   Closing the main window minimises Copasta to the system tray.
-  Right-click the tray icon to Show the window or Quit the app.
+  Right-click the tray icon to Show, Check for updates, or Quit the app.
+
+Automatic updates
+  Copasta checks GitHub for a new version every time it starts. When a new
+  version is available you'll see a small dialog with release notes and three
+  choices:
+    • Install now — downloads the new version, verifies it, and restarts
+      Copasta as the new version (takes a few seconds).
+    • Later — no action; you'll be asked again next time you launch Copasta.
+    • Skip this version — no prompt for this version; the next version after
+      it will still prompt.
+  You can also check manually at any time via Help → Check for updates...,
+  or from the system tray menu.
+  If Copasta is installed in a protected folder like Program Files, Windows
+  will show a single User Account Control prompt during the update — click
+  Yes to allow it to replace itself.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Troubleshooting

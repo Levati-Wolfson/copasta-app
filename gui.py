@@ -411,7 +411,7 @@ class PhraseDialog(tk.Toplevel):
 class MainWindow:
     """Main app window: left Treeview (folders/phrases), toolbar, right panel / add-edit."""
 
-    def __init__(self, get_data, save_data, get_settings=None, save_settings=None, on_close_callback=None, on_settings_callback=None, on_quit_callback=None):
+    def __init__(self, get_data, save_data, get_settings=None, save_settings=None, on_close_callback=None, on_settings_callback=None, on_quit_callback=None, on_check_for_updates_callback=None, app_version=None):
         self._get_data = get_data
         self._save_data = save_data
         self._get_settings = get_settings
@@ -419,6 +419,8 @@ class MainWindow:
         self._on_close = on_close_callback
         self._on_settings = on_settings_callback
         self._on_quit = on_quit_callback
+        self._on_check_for_updates = on_check_for_updates_callback
+        self._app_version = app_version
         self._dup_ab_phrase_ids = set()
         self._dup_ab_folder_ids = set()
 
@@ -460,6 +462,26 @@ class MainWindow:
         file_menu.add_command(label="Minimize to tray", command=self._on_window_close)
         file_menu.add_command(label="Quit", command=self._quit)
         file_menubutton.config(menu=file_menu)
+
+        # Help menu
+        help_menubutton = ttk.Menubutton(menu_frame, text="Help")
+        help_menubutton.pack(side=tk.LEFT, padx=2)
+        help_menu = tk.Menu(
+            help_menubutton,
+            tearoff=0,
+            bg="#2b2b2b",
+            fg="#ffffff",
+            activebackground="#375a7f",
+            activeforeground="#ffffff",
+            borderwidth=0,
+            relief=tk.FLAT,
+        )
+        if self._on_check_for_updates is not None:
+            help_menu.add_command(label="Check for updates...", command=self._on_check_for_updates)
+            help_menu.add_separator()
+        help_menu.add_command(label="About Copasta", command=self._show_about)
+        help_menubutton.config(menu=help_menu)
+
         self._dup_banner = ttk.Label(
             menu_frame,
             text="",
@@ -1159,6 +1181,20 @@ class MainWindow:
     def _open_settings(self):
         if self._on_settings:
             self._on_settings()
+
+    def _show_about(self):
+        version = self._app_version or "unknown"
+        try:
+            from tkinter import messagebox
+            messagebox.showinfo(
+                "About Copasta",
+                f"Copasta {version}\n\n"
+                "A clipboard / phrase-paste utility.\n\n"
+                "Updates are delivered automatically from GitHub.",
+                parent=self.root,
+            )
+        except Exception:
+            logging.exception("Failed to show About dialog")
 
     def _load_geometry(self):
         if self._get_settings:

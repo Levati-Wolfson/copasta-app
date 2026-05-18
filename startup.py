@@ -7,7 +7,15 @@ APP_NAME = "Copasta"
 
 
 def _get_launcher_cmd():
-    """Command to run this app (pythonw + script path + --minimized flag)."""
+    """Command to run Copasta at logon.
+
+    - Packaged build (PyInstaller bundle): run the .exe directly with --minimized.
+    - Dev (running from source):           run pythonw.exe main.py --minimized.
+    """
+    if getattr(sys, "frozen", False):
+        exe = os.path.abspath(sys.executable)
+        return '"%s" --minimized' % exe
+
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")
     exe = sys.executable
     if exe.lower().endswith("python.exe"):
