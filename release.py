@@ -216,6 +216,18 @@ def build_exe():
     size_mb = os.path.getsize(ZIP_PATH) / (1024 * 1024)
     info(f"Built {EXE_PATH} and {ZIP_PATH} ({size_mb:.1f} MB zip)")
 
+    # Drop one-file era artifacts if they are still in dist/ from an older build.
+    for stale in (
+        os.path.join(DIST_DIR, EXE_NAME),
+        os.path.join(DIST_DIR, EXE_NAME + ".sha256"),
+    ):
+        if os.path.isfile(stale) and os.path.abspath(stale) != os.path.abspath(EXE_PATH):
+            try:
+                os.remove(stale)
+                info(f"Removed stale {os.path.basename(stale)}")
+            except OSError as e:
+                warn(f"Could not remove stale {stale}: {e}")
+
 
 def write_sha256():
     h = hashlib.sha256()

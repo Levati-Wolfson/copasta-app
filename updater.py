@@ -849,13 +849,16 @@ if (-not $replaced) {{
     exit 1
 }}
 
-Log "Replace succeeded; spawning deferred relaunch cmd."
-$sysCmd = Join-Path $env:SystemRoot 'System32\cmd.exe'
+Log "Replace succeeded; spawning deferred relaunch (hidden PowerShell)."
+$psRelaunch = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 try {{
-    Start-Process -FilePath $sysCmd -ArgumentList @('/c', 'start', '""', '/min', $relaunchPs1) -WindowStyle Hidden | Out-Null
-    Log "Deferred relaunch cmd started."
+    Start-Process -FilePath $psRelaunch -ArgumentList @(
+        '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-WindowStyle', 'Hidden', '-File', $relaunchPs1
+    ) -WindowStyle Hidden | Out-Null
+    Log "Deferred relaunch ps1 started (hidden)."
 }} catch {{
-    Log ("Deferred relaunch cmd start failed: " + $_.Exception.Message)
+    Log ("Deferred relaunch ps1 start failed: " + $_.Exception.Message)
 }}
 
 $selfPath = $MyInvocation.MyCommand.Path
@@ -866,46 +869,121 @@ Start-Process -FilePath 'powershell.exe' -ArgumentList @(
 """
 
 
+_DELAYED_RELAUNCH_PS1_TEMPLATE = r"""# Copasta deferred relaunch. Auto-generated.
+$ErrorActionPreference = 'SilentlyContinue'
+$installDir = '{install_dir}'
+$exePath = '{exe_path}'
+$logPath = '{log_path}'
+$diagPath = '{diag_path}'
+$waitSec = {wait_seconds}
+
+function Write-RelaunchDiag($msg) {{
+    try {{
+        $line = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + ' [relaunch] ' + $msg + [Environment]::NewLine
+        [void][System.IO.File]::AppendAllText($diagPath, $line)
+    }} catch {{ }}
+}}
+
+function Get-LogStampUtc {{
+    if (-not (Test-Path -LiteralPath $logPath)) {{ return [datetime]::MinValue }}
+    return (Get-Item -LiteralPath $logPath).LastWriteTimeUtc
+}}
+
+function Test-LogUpdatedSince($sinceUtc) {{
+    if (-not (Test-Path -LiteralPath $logPath)) {{ return $false }}
+    $item = Get-Item -LiteralPath $logPath
+    if ($item.LastWriteTimeUtc -le $sinceUtc) {{ return $false }}
+    $tail = Get-Content -LiteralPath $logPath -Tail 40 -ErrorAction SilentlyContinue
+    if (-not $tail) {{ return $false }}
+    return ($tail | Where-Object {{ $_ -match 'Logging initialized' }} | Measure-Object).Count -gt 0
+}}
+
+function Stop-StaleCopastaInInstallDir {{
+    Get-Process -Name 'Copasta' -ErrorAction SilentlyContinue | ForEach-Object {{
+        try {{
+            $p = $_
+            $path = $null
+            try {{ $path = $p.MainModule.FileName }} catch {{ }}
+            if (-not $path) {{
+                $wp = Get-CimInstance Win32_Process -Filter "ProcessId=$($p.Id)" -ErrorAction SilentlyContinue
+                if ($wp) {{ $path = $wp.ExecutablePath }}
+            }}
+            if ($path -and $path.StartsWith($installDir, [System.StringComparison]::OrdinalIgnoreCase)) {{
+                Write-RelaunchDiag "stopping stale Copasta pid $($p.Id)"
+                Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            }}
+        }} catch {{ }}
+    }}
+    Start-Sleep -Seconds 2
+}}
+
+function Start-CopastaGui {{
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $exePath
+    $psi.WorkingDirectory = $installDir
+    $psi.UseShellExecute = $true
+    return [System.Diagnostics.Process]::Start($psi)
+}}
+
+Write-RelaunchDiag "onedir relaunch (~$waitSec s wait)"
+Start-Sleep -Seconds $waitSec
+$runtimeDir = Join-Path $installDir '_copasta_runtime'
+if (Test-Path -LiteralPath $runtimeDir) {{
+    Remove-Item -LiteralPath $runtimeDir -Recurse -Force -ErrorAction SilentlyContinue
+}}
+Stop-StaleCopastaInInstallDir
+$logBefore = Get-LogStampUtc
+$started = $false
+foreach ($attempt in 1..3) {{
+    Write-RelaunchDiag "launch attempt $attempt"
+    try {{
+        $proc = Start-CopastaGui
+        if ($proc) {{ Write-RelaunchDiag "started pid $($proc.Id)" }}
+    }} catch {{
+        Write-RelaunchDiag ("launch failed: " + $_.Exception.Message)
+        Start-Sleep -Seconds 8
+        continue
+    }}
+    Start-Sleep -Seconds 12
+    if (Test-LogUpdatedSince $logBefore) {{
+        Write-RelaunchDiag 'copasta.log updated after launch'
+        $started = $true
+        break
+    }}
+    try {{
+        if ($proc -and $proc.HasExited) {{
+            Write-RelaunchDiag "process exited early (code $($proc.ExitCode))"
+        }}
+    }} catch {{ }}
+    Stop-StaleCopastaInInstallDir
+    Start-Sleep -Seconds 5
+}}
+if (-not $started) {{
+    Write-RelaunchDiag 'WARNING Copasta did not log a new startup; user should start manually'
+}}
+Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+"""
+
+
 def _write_delayed_relaunch_script(staging_dir, install_dir, exe_name):
-    """Write a detached .cmd that waits briefly, then launches Copasta (onedir)."""
+    """Write a detached PowerShell script that waits, then launches Copasta (onedir)."""
     install_dir = os.path.abspath(install_dir)
     exe_path = os.path.join(install_dir, exe_name)
     log_path = os.path.join(install_dir, "copasta.log")
     diag_path = os.path.join(
         os.environ.get("TEMP", os.path.expanduser("~")), "copasta_update_diag_user.txt"
     )
-    wait_pings = 31 if _is_cloud_synced_install_path(install_dir) else 16
-    install_q = _escape_for_cmd_set_value(install_dir)
-    exe_q = _escape_for_cmd_set_value(exe_path)
-    log_q = _escape_for_cmd_set_value(log_path)
-    diag_q = _escape_for_cmd_set_value(diag_path)
-    lines = [
-        "@echo off",
-        "setlocal EnableExtensions",
-        f"set \"INSTALLDIR={install_q}\"",
-        f"set \"EXE={exe_q}\"",
-        f"set \"LOG={log_q}\"",
-        f"set \"DIAG={diag_q}\"",
-        f'>>"%DIAG%" echo [relaunch] onedir relaunch (~{wait_pings - 1}s wait)',
-        f"ping -n {wait_pings} 127.0.0.1 >nul",
-        'if exist "%INSTALLDIR%\\Copasta\\_copasta_runtime" rmdir /s /q "%INSTALLDIR%\\Copasta\\_copasta_runtime" 2>nul',
-        '>>"%DIAG%" echo [relaunch] launching Copasta',
-        'cd /d "%INSTALLDIR%"',
-        'start "" "%EXE%"',
-        "ping -n 16 127.0.0.1 >nul",
-        'findstr /C:"Logging initialized" "%LOG%" >nul 2>&1',
-        "if errorlevel 1 (",
-        '  >>"%DIAG%" echo [relaunch] WARNING copasta.log not updated yet; user may need to start manually',
-        ") else (",
-        '  >>"%DIAG%" echo [relaunch] copasta.log shows successful startup',
-        ")",
-        "del \"%~f0\" 2>nul",
-        "endlocal",
-    ]
-    path = os.path.join(staging_dir, "copasta_delayed_relaunch.cmd")
-    with open(path, "w", encoding="utf-8", newline="\r\n") as f:
-        f.write("\r\n".join(lines))
-        f.write("\r\n")
+    wait_sec = 45 if _is_cloud_synced_install_path(install_dir) else 20
+    script = _DELAYED_RELAUNCH_PS1_TEMPLATE.format(
+        install_dir=_escape_for_ps_single_quotes(install_dir),
+        exe_path=_escape_for_ps_single_quotes(exe_path),
+        log_path=_escape_for_ps_single_quotes(log_path),
+        diag_path=_escape_for_ps_single_quotes(diag_path),
+        wait_seconds=wait_sec,
+    )
+    path = os.path.join(staging_dir, "copasta_delayed_relaunch.ps1")
+    with open(path, "w", encoding="utf-8-sig", newline="\n") as f:
+        f.write(script)
     return path
 
 
