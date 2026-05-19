@@ -9,19 +9,19 @@ Steps performed, in order:
 
     1. Validate args, version string, and that the working tree is clean.
     2. Rewrite _version.py with the new version.
-    3. Build dist/Copasta.exe with PyInstaller (copasta.spec).
-    4. Compute SHA-256 -> dist/Copasta.exe.sha256.
+    3. Build dist/Copasta/ (onedir) with PyInstaller (copasta.spec).
+    4. Zip dist/Copasta/ -> dist/Copasta.zip; SHA-256 -> dist/Copasta.zip.sha256.
     5. git add _version.py && git commit -m "Release v<ver>" && git tag v<ver>.
     6. git push origin <branch> && git push origin v<ver>.
     7. gh release create v<ver> --title "Copasta <ver>" --notes-file <...>
-       and upload Copasta.exe + Copasta.exe.sha256.
+       and upload Copasta.zip + Copasta.zip.sha256.
 
 Flags:
     --notes "..."         Inline release notes (short).
     --notes-file PATH     Path to a text file with release notes.
     --dry-run             Print what would happen; don't push or publish.
     --allow-dirty         Skip the clean-working-tree check.
-    --skip-build          Reuse the existing dist/Copasta.exe.
+    --skip-build          Reuse the existing dist/Copasta.zip (and onedir folder).
 
 Requires on PATH: python, git, pyinstaller (or `python -m PyInstaller`),
 and the GitHub CLI (`gh`), authenticated for Levati-Wolfson/copasta-app.
@@ -42,9 +42,13 @@ PROJECT_ROOT   = os.path.dirname(os.path.abspath(__file__))
 VERSION_FILE   = os.path.join(PROJECT_ROOT, "_version.py")
 SPEC_FILE      = os.path.join(PROJECT_ROOT, "copasta.spec")
 DIST_DIR       = os.path.join(PROJECT_ROOT, "dist")
+APP_DIR_NAME   = "Copasta"
+APP_DIR        = os.path.join(DIST_DIR, APP_DIR_NAME)
 EXE_NAME       = "Copasta.exe"
-EXE_PATH       = os.path.join(DIST_DIR, EXE_NAME)
-SHA_PATH       = EXE_PATH + ".sha256"
+EXE_PATH       = os.path.join(APP_DIR, EXE_NAME)
+ZIP_NAME       = "Copasta.zip"
+ZIP_PATH       = os.path.join(DIST_DIR, ZIP_NAME)
+SHA_PATH       = ZIP_PATH + ".sha256"
 
 GH_OWNER       = "Levati-Wolfson"
 GH_REPO        = "copasta-app"
@@ -186,26 +190,41 @@ def ensure_tag_unused(tag):
 
 
 def build_exe():
-    info("Building Copasta.exe with PyInstaller (this can take 30-90s)...")
-    # Prefer the bare command; fall back to module form.
+    import zipfile
+
+    info("Building Copasta (onedir) with PyInstaller (this can take 30-90s)...")
     cmd = ["pyinstaller", "--noconfirm", "--clean", SPEC_FILE]
     if which("pyinstaller") is None:
         cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", SPEC_FILE]
     run(cmd)
     if not os.path.isfile(EXE_PATH):
         raise ReleaseError(f"Build finished but {EXE_PATH} is missing.")
-    size_mb = os.path.getsize(EXE_PATH) / (1024 * 1024)
-    info(f"Built {EXE_PATH} ({size_mb:.1f} MB)")
+    internal = os.path.join(APP_DIR, "_internal")
+    if not os.path.isdir(internal):
+        raise ReleaseError(f"Build finished but {internal} is missing (onedir layout).")
+
+    info(f"Zipping {APP_DIR} -> {ZIP_PATH} ...")
+    if os.path.isfile(ZIP_PATH):
+        os.remove(ZIP_PATH)
+    with zipfile.ZipFile(ZIP_PATH, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, _dirs, files in os.walk(APP_DIR):
+            for name in files:
+                full = os.path.join(root, name)
+                arc = os.path.join(APP_DIR_NAME, os.path.relpath(full, APP_DIR))
+                zf.write(full, arc.replace("\\", "/"))
+
+    size_mb = os.path.getsize(ZIP_PATH) / (1024 * 1024)
+    info(f"Built {EXE_PATH} and {ZIP_PATH} ({size_mb:.1f} MB zip)")
 
 
 def write_sha256():
     h = hashlib.sha256()
-    with open(EXE_PATH, "rb") as f:
+    with open(ZIP_PATH, "rb") as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     digest = h.hexdigest()
     with open(SHA_PATH, "w", encoding="utf-8") as f:
-        f.write(f"{digest}  {EXE_NAME}\n")
+        f.write(f"{digest}  {ZIP_NAME}\n")
     info(f"SHA-256: {digest}")
     info(f"Wrote {SHA_PATH}")
     return digest
@@ -236,7 +255,7 @@ def gh_create_release(tag, new_version, notes_file, dry_run):
         "--repo", GH_NWO,
         "--title", title,
         "--notes-file", notes_file,
-        EXE_PATH,
+        ZIP_PATH,
         SHA_PATH,
     ]
     if dry_run:
@@ -258,7 +277,7 @@ def main():
     ap.add_argument("--allow-dirty", action="store_true",
                     help="Skip the 'working tree clean' check.")
     ap.add_argument("--skip-build", action="store_true",
-                    help="Reuse existing dist/Copasta.exe instead of rebuilding.")
+                    help="Reuse existing dist/Copasta/ and Copasta.zip.")
     args = ap.parse_args()
 
     new_version = args.version.strip().lstrip("v")

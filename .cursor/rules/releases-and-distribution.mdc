@@ -1,0 +1,48 @@
+---
+description: How Copasta is built, released, and self-updated (onedir + zip)
+alwaysApply: true
+---
+
+# Copasta distribution and self-update
+
+## What users install (since onedir switch)
+
+PyInstaller **onedir** output—not a single standalone exe:
+
+```text
+Copasta/
+  Copasta.exe
+  _internal/    (DLLs, Python runtime, app data)
+```
+
+`copasta.spec` builds into `dist/Copasta/`. Do not ship only a lone `Copasta.exe` without `_internal/`.
+
+## What GitHub releases publish
+
+Each release uploads **two files** (primary update path):
+
+| File | Role |
+|------|------|
+| `Copasta.zip` | Zip of the whole `Copasta/` folder (exe + `_internal/`) |
+| `Copasta.zip.sha256` | One-line checksum file so the app can verify the download wasn’t corrupted or tampered with |
+
+Built by `release.py` → `dist/Copasta.zip` and `dist/Copasta.zip.sha256`, then attached via `gh release create`.
+
+Releases must include **both** zip assets; the updater does not accept the old single-exe release format.
+
+## How self-update works (agent reference)
+
+1. App checks GitHub (or local test files) for a newer version.
+2. Downloads `Copasta.zip` + `.sha256`, verifies checksum.
+3. Extracts to a temp folder, helper copies into the install directory (exe + `_internal/`).
+4. Deferred `.cmd` relaunch; success can be inferred from `copasta.log` (“Logging initialized”).
+
+Local dev test: `update_test_build/Copasta/` (fake old version) + `update_test_build/Copasta.zip` + `Copasta.zip.sha256` beside it (real build). Run `update_test_build/Copasta/Copasta.exe`—not a stray one-file exe at `update_test_build/Copasta.exe`.
+
+## Releasing a version
+
+User says e.g. “release 7.1” → run `python release.py <ver> --notes-file ...` (or `--notes`). Script bumps `_version.py`, PyInstaller build, zip + sha256, git tag, `gh release` with zip assets. Do not ask the user to run PyInstaller manually.
+
+## Explaining sha256 to the user (when needed)
+
+“A small text file with a fingerprint of the zip. The app compares it after download—like checking a package seal. If it doesn’t match, it refuses to install.”

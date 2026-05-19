@@ -1,0 +1,26 @@
+---
+description: Refresh fake old Copasta test folder after code changes (self-update testing)
+alwaysApply: true
+---
+
+# Update test build (`update_test_build`)
+
+When you finish a **substantive** change set to this Windows app—anything that ships in `Copasta.exe` / `_internal/` or affects self-update (**`updater.py`**, **`main.py`**, **`startup.py`**, **`tray.py`**, **`gui.py`**, **`copasta.spec`**, **`_version.py`** usage, PyInstaller)—**do not tell the user to rebuild**.
+
+Instead, from repo root run:
+
+```text
+python tools/build_update_test_build.py
+```
+
+That script sets **`_version.py`** to fake **`1.0`**, builds onedir `dist/Copasta/`, copies it to **`update_test_build/Copasta/`**, copies **`dist/Copasta.zip`** + **`.sha256`** to **`update_test_build/`**, restores the real **`__version__`**, then rebuilds **`dist/`**.
+
+Optional alternate fake version:
+
+```text
+python tools/build_update_test_build.py 1.2.3
+```
+
+**User test:** run `update_test_build/Copasta/Copasta.exe` (keep `_internal/` next to it). Local update uses `update_test_build/Copasta.zip` + `Copasta.zip.sha256`.
+
+Skip this for documentation-only edits or changes that cannot affect the packaged binary.

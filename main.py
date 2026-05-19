@@ -12,6 +12,25 @@ from _version import __version__ as APP_VERSION
 _SINGLE_INSTANCE_MUTEX = None  # held for process lifetime to block second instances
 
 
+def _cleanup_stale_pyi_runtime_beside_exe():
+    """Remove mistaken extract dir from a brief runtime_tmpdir experiment (beside the exe)."""
+    if not getattr(sys, "frozen", False):
+        return
+    stale = os.path.join(
+        os.path.dirname(os.path.abspath(sys.executable)),
+        "Copasta",
+        "_copasta_runtime",
+    )
+    if not os.path.isdir(stale):
+        return
+    import shutil
+
+    try:
+        shutil.rmtree(stale, ignore_errors=True)
+    except OSError:
+        pass
+
+
 def _ensure_single_instance():
     """
     Acquire a named Windows mutex. If it already exists another instance is running:
@@ -55,8 +74,13 @@ def _setup_logging():
 
 
 def main():
+    _cleanup_stale_pyi_runtime_beside_exe()
     _ensure_single_instance()
     _setup_logging()
+    try:
+        updater.cleanup_stale_download_artifacts()
+    except Exception:
+        logging.exception("cleanup_stale_download_artifacts raised")
     start_minimized = "--minimized" in sys.argv
     data = data_model.load_data()
 

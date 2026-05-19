@@ -5,6 +5,38 @@ A Windows desktop app for storing and pasting rich text phrases. Supports folder
 GitHub: https://github.com/Levati-Wolfson/copasta-app
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+First-time installation (Windows)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1. Open the latest release on GitHub:
+       https://github.com/Levati-Wolfson/copasta-app/releases
+
+  2. Download Copasta.zip (the main download for that release).
+
+  3. Unzip it (right-click the zip → Extract All, or open it and drag the
+     folder out). You should get a folder named Copasta containing:
+       • Copasta.exe   — the program you run
+       • _internal\    — support files (leave this folder next to Copasta.exe)
+
+  4. Double-click Copasta.exe inside that Copasta folder.
+
+  5. Put the whole Copasta folder somewhere you will keep it, for example:
+       Documents\Copasta
+       or a folder on your Desktop.
+     Avoid installing under Program Files unless you need to; updates there
+     may ask for an extra Windows permission click.
+
+  6. Optional: right-click Copasta.exe → Pin to taskbar, or Send to →
+     Desktop (create shortcut). The shortcut must still point at Copasta.exe
+     inside the Copasta folder (with _internal beside it).
+
+  Do not copy only Copasta.exe to another location without the _internal
+  folder — the app will not run correctly.
+
+  The small Copasta.zip.sha256 file on the release page is used automatically
+  when Copasta updates itself; you do not need to download it for a first install.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Features
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -74,8 +106,8 @@ Automatic updates
   Copasta checks GitHub for a new version every time it starts. When a new
   version is available you'll see a small dialog with release notes and three
   choices:
-    • Install now — downloads the new version, verifies it, and restarts
-      Copasta as the new version (takes a few seconds).
+    • Install now — downloads Copasta.zip, checks it, replaces the files in
+      your Copasta folder, and restarts (usually under a minute).
     • Later — no action; you'll be asked again next time you launch Copasta.
     • Skip this version — no prompt for this version; the next version after
       it will still prompt.

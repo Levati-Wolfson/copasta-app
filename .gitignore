@@ -11,14 +11,22 @@ config.json
 *.tmp
 
 # Build output
+Copasta_new.exe
+Copasta.pending_delete.exe
+Copasta_failed_update.exe
 dist/
 build/
 installer_output/
 release/
 *.egg-info/
 
-# PyInstaller
+# Local self-update test tree (regenerate with tools/build_update_test_build.py)
+update_test_build/*
+!update_test_build/README.txt
+
+# PyInstaller / old one-file leftovers
 *.spec.bak
+_copasta_runtime/
 
 # Editor / OS
 .vscode/

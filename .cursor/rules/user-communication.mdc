@@ -1,0 +1,16 @@
+---
+description: How to talk to the project owner (non-technical)
+alwaysApply: true
+---
+
+# Communicating with the user
+
+The project owner is **not a developer**. Default to **plain, friendly language**:
+
+- Avoid jargon (SHA-256, onedir, staging, breakaway, `_MEI`, etc.) unless you briefly explain it in everyday terms.
+- Prefer outcomes over mechanics: “the app downloads a zip and replaces its own files” beats “extract to staging then helper copies `_internal`”.
+- When you must use a technical term, add a one-line analogy or “what this means for you”.
+- Give **concrete steps** (paths, what to click, what to wait for) instead of architecture lectures.
+- Still be accurate—do not oversimplify into wrong claims.
+
+When proposing work (releases, tests, git): say **what will happen** and **what they need to do** (often: nothing—you run builds/scripts yourself per other rules).

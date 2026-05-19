@@ -15,6 +15,7 @@ import ctypes
 
 import app_icon
 import data_model
+import updater
 from rich_editor import RichTextEditor
 
 
@@ -1185,13 +1186,12 @@ class MainWindow:
     def _show_about(self):
         version = self._app_version or "unknown"
         try:
-            from tkinter import messagebox
-            messagebox.showinfo(
+            updater.show_dark_info(
+                self.root,
                 "About Copasta",
                 f"Copasta {version}\n\n"
                 "A clipboard / phrase-paste utility.\n\n"
                 "Updates are delivered automatically from GitHub.",
-                parent=self.root,
             )
         except Exception:
             logging.exception("Failed to show About dialog")
