@@ -8,4 +8,4 @@ The version string must match the format expected by updater._parse_version:
 e.g. "1.0.0", "6.22", "6.22.1"
 """
 
-__version__ = "7.0.1"
+__version__ = "7.0.2"
