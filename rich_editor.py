@@ -1,15 +1,34 @@
 """Rich text editor widget: toolbar (Bold, Italic, Underline, etc.) and Text with HTML export."""
 import html as html_module
+import logging
 import tkinter as tk
 import webbrowser
 import ctypes
-from tkinter import font as tkfont
+from dataclasses import dataclass, replace
+from tkinter import filedialog, font as tkfont, messagebox
 from html.parser import HTMLParser
+from PIL import Image, ImageDraw, ImageGrab, ImageTk
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 
+from phrase_images import MAX_PREVIEW_EDGE, MIN_PREVIEW_EDGE, PREVIEW_SIZE_ATTR, PhraseImage
+
+_IMAGE_HANDLE_SIZE = 13
+_IMAGE_DRAG_THRESHOLD = 4
+
+
+@dataclass
+class _ImageGesture:
+    name: str
+    x: int
+    y: int
+    width: int
+    height: int
+    resize_source: Image.Image | None = None
+    moved: bool = False
+
 # Shared rich-text clipboard for cross-editor paste within the same process.
-# "spans" is a list of (text, frozenset_of_tags, link_url_or_None).
+# "spans" is a list of (text_or_image, frozenset_of_tags, link_url_or_None).
 # "seq"   is the Windows clipboard sequence number at the time of the copy,
 #         used to detect whether the system clipboard has changed since then.
 _rich_clipboard = {"plain": None, "spans": None, "seq": None}
@@ -128,6 +147,10 @@ class RichTextEditor(ttk.Frame):
         self._link_tooltip = None
         self._link_tooltip_text = ""
         self._font_offset = int(font_size_offset)
+        self._images = {}  # Image instance name -> (stored image, Tk preview).
+        self._selected_image = None
+        self._image_gesture = None
+        self._image_view_width = 260
         self._style = ttk.Style()
         # ttk.Button does not support per-widget font via configure(font=...),
         # so define dedicated styles for the B/I/U buttons.
@@ -136,6 +159,7 @@ class RichTextEditor(ttk.Frame):
         if self._show_toolbar:
             self._build_toolbar()
         self._build_text()
+        self._text.bind("<<Modified>>", self._on_text_modified)
         self._text.bind("<Control-b>", lambda e: self._toggle_tag_shortcut(TAG_BOLD))
         self._text.bind("<Control-B>", lambda e: self._toggle_tag_shortcut(TAG_BOLD))
         self._text.bind("<Control-i>", lambda e: self._toggle_tag_shortcut(TAG_ITALIC))
@@ -155,6 +179,9 @@ class RichTextEditor(ttk.Frame):
         self._text.bind("<Motion>", self._on_text_motion)
         self._text.bind("<Leave>", lambda e: self._hide_link_tooltip())
         self._text.bind("<Button-1>", self._on_text_click)
+        self._text.bind("<B1-Motion>", self._on_image_drag)
+        self._text.bind("<ButtonRelease-1>", self._on_image_drop)
+        self._text.bind("<Configure>", self._on_image_view_resize)
         if self._readonly:
             self.set_readonly(True)
 
@@ -185,6 +212,8 @@ class RichTextEditor(ttk.Frame):
         b_sup.pack(side=tk.LEFT, padx=2)
         b_link = ttk.Button(tb, text="Link", width=4, command=self._add_link, bootstyle="secondary")
         b_link.pack(side=tk.LEFT, padx=2)
+        b_image = ttk.Button(tb, text="Image…", command=self._choose_image, bootstyle="secondary")
+        b_image.pack(side=tk.LEFT, padx=2)
         ttk.Separator(tb, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
         b_bullet = ttk.Button(tb, text="\u2022", width=2, command=lambda: self._insert_list(True), bootstyle="secondary")
         b_bullet.pack(side=tk.LEFT, padx=2)
@@ -258,18 +287,193 @@ class RichTextEditor(ttk.Frame):
         except Exception:
             return None
 
+    def _iter_content(self, start, end):
+        for kind, value, index in self._text.dump(start, end, text=True, image=True):
+            if kind == "image":
+                yield index, self._images[value][0]
+            else:
+                for offset, char in enumerate(value):
+                    yield f"{index}+{offset}c", char
+
+    def _insert_image(self, index, image):
+        photo = self._image_preview(image)
+        name = self._text.image_create(index, image=photo, align="center")
+        self._images[name] = (image, photo)
+        return name
+
+    def _image_preview(self, image, selected=False, source=None):
+        if source is None:
+            with image.open() as original:
+                return self._image_preview(image, selected, original)
+        width, height = source.size
+        if image.preview_edge is None:
+            scale = min(1, min(260, self._image_view_width) / width, 200 / height)
+        else:
+            scale = min(image.preview_edge / max(width, height), self._image_view_width / width)
+        size = (max(1, round(width * scale)), max(1, round(height * scale)))
+        preview = source.resize(size, Image.LANCZOS).convert("RGBA")
+        # Leave room for the grip even on very skinny or tiny pictures.
+        if min(preview.size) < _IMAGE_HANDLE_SIZE:
+            padded = Image.new("RGBA", tuple(max(side, _IMAGE_HANDLE_SIZE) for side in preview.size))
+            padded.paste(preview)
+            preview = padded
+        if selected:
+            right, bottom = preview.width - 1, preview.height - 1
+            grip_x, grip_y = right - _IMAGE_HANDLE_SIZE + 1, bottom - _IMAGE_HANDLE_SIZE + 1
+            draw = ImageDraw.Draw(preview)
+            draw.rectangle((0, 0, right, bottom), outline="#6eb4ff", width=2)
+            draw.rectangle((grip_x, grip_y, right, bottom), fill="#236fad", outline="white")
+            for length in (4, 8):
+                draw.line((right - length - 2, bottom - 2, right - 2, bottom - length - 2), fill="white")
+        return ImageTk.PhotoImage(preview, master=self._text)
+
+    def _redraw_image(self, name, source=None):
+        image, _ = self._images[name]
+        photo = self._image_preview(image, name == self._selected_image, source)
+        self._text.image_configure(name, image=photo)
+        self._images[name] = (image, photo)
+
+    def _select_image(self, name):
+        old_name = self._selected_image
+        if old_name == name:
+            return
+        self._selected_image = name
+        for image_name in (old_name, name):
+            if image_name in self._images:
+                self._redraw_image(image_name)
+
+    def _on_image_view_resize(self, event):
+        width = max(_IMAGE_HANDLE_SIZE, event.width - 20)
+        if width != self._image_view_width:
+            self._image_view_width = width
+            for name in self._text.image_names():
+                self._redraw_image(name)
+
+    def _image_at(self, x, y):
+        index = self._text.index(f"@{x},{y}")
+        for _, name, _ in self._text.dump(index, f"{index}+1c", image=True):
+            bounds = self._text.bbox(name)
+            if bounds:
+                left, top, width, height = bounds
+                if left <= x < left + width and top <= y < top + height:
+                    return name, bounds
+        return None, None
+
+    def _on_image_handle(self, name, bounds, x, y):
+        if name != self._selected_image or bounds is None:
+            return False
+        left, top, width, height = bounds
+        return x >= left + width - _IMAGE_HANDLE_SIZE and y >= top + height - _IMAGE_HANDLE_SIZE
+
+    def _set_image_selection_range(self, name):
+        self._text.tag_remove(tk.SEL, "1.0", tk.END)
+        self._text.tag_add(tk.SEL, name, f"{name}+1c")
+        self._text.mark_set(tk.INSERT, f"{name}+1c")
+
+    def _image_drop_index(self, x, y):
+        index = self._text.index(f"@{x},{y}")
+        bounds = self._text.bbox(index)
+        if bounds and x >= bounds[0] + bounds[2] / 2 and self._text.get(index) != "\n":
+            index = self._text.index(f"{index}+1c")
+        return index if self._text.compare(index, "<=", "end-1c") else "end-1c"
+
+    def _on_image_drag(self, event):
+        gesture = self._image_gesture
+        if gesture is None:
+            return
+        dx, dy = event.x - gesture.x, event.y - gesture.y
+        if not gesture.moved and max(abs(dx), abs(dy)) < _IMAGE_DRAG_THRESHOLD:
+            return "break"
+        gesture.moved = True
+        if gesture.resize_source is not None:
+            original_width, original_height = gesture.resize_source.size
+            longest = max(original_width, original_height)
+            unit_x, unit_y = original_width / longest, original_height / longest
+            scale = (dx * unit_x + dy * unit_y) / (unit_x ** 2 + unit_y ** 2)
+            edge = round(max(gesture.width, gesture.height) + scale)
+            edge = min(MAX_PREVIEW_EDGE, max(MIN_PREVIEW_EDGE, edge))
+            image, photo = self._images[gesture.name]
+            if edge != image.preview_edge:
+                self._images[gesture.name] = (replace(image, preview_edge=edge), photo)
+                self._redraw_image(gesture.name, gesture.resize_source)
+        else:
+            if event.y < 12:
+                self._text.yview_scroll(-1, "units")
+            elif event.y >= self._text.winfo_height() - 12:
+                self._text.yview_scroll(1, "units")
+            self._text.mark_set(tk.INSERT, self._image_drop_index(event.x, event.y))
+        return "break"
+
+    def _on_image_drop(self, event):
+        gesture = self._image_gesture
+        if gesture is None:
+            return
+        self._image_gesture = None
+        name = gesture.name
+        if gesture.resize_source is not None:
+            gesture.resize_source.close()
+        elif (gesture.moved and 0 <= event.x < self._text.winfo_width()
+              and 0 <= event.y < self._text.winfo_height()):
+            target = self._image_drop_index(event.x, event.y)
+            if not (self._text.compare(target, "==", name) or self._text.compare(target, "==", f"{name}+1c")):
+                image, _ = self._images[name]
+                new_name = self._insert_image(target, image)
+                self._text.delete(name)
+                del self._images[name]
+                name = new_name
+                self._select_image(name)
+                self._text.edit_reset()
+                self._refresh_derived_tags()
+        self._set_image_selection_range(name)
+        return "break"
+
+    def _on_text_modified(self, event):
+        if not self._text.edit_modified():
+            return
+        removed = self._images.keys() - set(self._text.image_names()) if self._images else ()
+        if removed:
+            for name in removed:
+                del self._images[name]
+            if self._selected_image in removed:
+                self._selected_image = None
+                if self._image_gesture and self._image_gesture.resize_source is not None:
+                    self._image_gesture.resize_source.close()
+                self._image_gesture = None
+            # Tk tracks text edits in its undo history but omits embedded images.
+            self._text.edit_reset()
+        self._text.edit_modified(False)
+
+    def _choose_image(self):
+        if self._readonly:
+            return
+        path = filedialog.askopenfilename(
+            parent=self.winfo_toplevel(), title="Insert image",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.webp"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            with Image.open(path, formats=["PNG", "JPEG", "BMP", "WEBP"]) as source:
+                image = PhraseImage.from_image(source)
+        except (OSError, ValueError, Image.DecompressionBombError):
+            messagebox.showerror("Insert image", "Copasta could not open this image.", parent=self.winfo_toplevel())
+            return
+        self._insert_spans_at_cursor([(image, (), None)])
+        self._text.focus_set()
+
     def _get_selection_spans(self, start, end):
-        """Return [(text, frozenset_of_tags, link_url_or_None)] for the range [start, end)."""
-        content = self._text.get(start, end)
-        if not content:
-            return []
+        """Copy a range of text and images with its inline formatting."""
         spans = []
         run_text = ""
         run_tags = None
         run_link = None
-        start_norm = self._text.index(start)
-        for i, ch in enumerate(content):
-            pos = "%s+%dc" % (start_norm, i)
+        for pos, ch in self._iter_content(start, end):
+            if isinstance(ch, PhraseImage):
+                if run_text:
+                    spans.append((run_text, run_tags, run_link))
+                spans.append((ch, (), None))
+                run_text, run_tags, run_link = "", None, None
+                continue
             names = self._text.tag_names(pos)
             inline = frozenset(t for t in names if t in INLINE_TAG_ORDER)
             link = next((_unescape_html(t[5:]) for t in names if t.startswith("link_")), None)
@@ -294,7 +498,12 @@ class RichTextEditor(ttk.Frame):
                 self._text.delete(sel[0], sel[1])
         except tk.TclError:
             pass
+        has_images = False
         for text, inline_tags, link_url in spans:
+            if isinstance(text, PhraseImage):
+                self._insert_image(tk.INSERT, text)
+                has_images = True
+                continue
             if not text:
                 continue
             pos_start = self._text.index(tk.INSERT)
@@ -304,6 +513,8 @@ class RichTextEditor(ttk.Frame):
                 self._text.tag_add(tag, pos_start, pos_end)
             if link_url and TAG_LINK in inline_tags:
                 self._text.tag_add("link_%s" % _escape_html(link_url), pos_start, pos_end)
+        if has_images:
+            self._text.edit_reset()
         self._refresh_derived_tags()
 
     def _on_copy(self, event=None):
@@ -347,7 +558,11 @@ class RichTextEditor(ttk.Frame):
             and current_seq == _rich_clipboard["seq"]
         )
         # Fallback: if sequence numbers unavailable, compare plain text
-        if not use_rich and _rich_clipboard["plain"] is not None:
+        if (
+            not use_rich
+            and (current_seq is None or _rich_clipboard["seq"] is None)
+            and _rich_clipboard["plain"] is not None
+        ):
             try:
                 use_rich = (self._text.clipboard_get() == _rich_clipboard["plain"]
                             and _rich_clipboard["spans"] is not None)
@@ -360,6 +575,16 @@ class RichTextEditor(ttk.Frame):
             try:
                 text = self._text.clipboard_get()
             except tk.TclError:
+                text = ""
+            if not text:
+                try:
+                    image = ImageGrab.grabclipboard()
+                    if isinstance(image, Image.Image):
+                        with image:
+                            embedded = PhraseImage.from_image(image)
+                        self._insert_spans_at_cursor([(embedded, (), None)])
+                except (OSError, ValueError, Image.DecompressionBombError):
+                    logging.debug("Could not read image from the clipboard", exc_info=True)
                 return "break"
             try:
                 sel = self._text.tag_ranges(tk.SEL)
@@ -482,6 +707,17 @@ class RichTextEditor(ttk.Frame):
             pass
 
     def _on_text_motion(self, event):
+        if not self._readonly and self._images:
+            name, bounds = self._image_at(event.x, event.y)
+            if self._on_image_handle(name, bounds, event.x, event.y):
+                cursor = "size_nw_se"
+            else:
+                cursor = "fleur" if name else "xterm"
+            if self._text.cget("cursor") != cursor:
+                self._text.configure(cursor=cursor)
+            if name:
+                self._hide_link_tooltip()
+                return
         try:
             idx = self._text.index("@%d,%d" % (event.x, event.y))
             names = self._text.tag_names(idx)
@@ -510,7 +746,20 @@ class RichTextEditor(ttk.Frame):
 
     def _on_text_click(self, event):
         if not self._readonly:
-            return
+            name, bounds = self._image_at(event.x, event.y) if self._images else (None, None)
+            if name is None:
+                self._select_image(None)
+                return
+            resizing = self._on_image_handle(name, bounds, event.x, event.y)
+            self._select_image(name)
+            self._set_image_selection_range(name)
+            self._text.focus_set()
+            source = None
+            if resizing:
+                with self._images[name][0].open() as image:
+                    source = image.copy()
+            self._image_gesture = _ImageGesture(name, event.x, event.y, bounds[2], bounds[3], source)
+            return "break"
         try:
             idx = self._text.index("@%d,%d" % (event.x, event.y))
             names = self._text.tag_names(idx)
@@ -552,10 +801,6 @@ class RichTextEditor(ttk.Frame):
 
     def get_html(self):
         """Export Text content with robust nested HTML tags."""
-        content = self._text.get("1.0", "end-1c")
-        if not content:
-            return "<p></p>"
-
         def tags_at(pos):
             names = self._text.tag_names(pos)
             wanted = [t for t in names if t in INLINE_TAG_ORDER]
@@ -581,9 +826,9 @@ class RichTextEditor(ttk.Frame):
         open_stack = []
         open_link_url = None
 
-        for idx, ch in enumerate(content):
-            pos = "1.0+%dc" % idx
-            desired_tags, desired_link_url = tags_at(pos)
+        for pos, ch in self._iter_content("1.0", "end-1c"):
+            is_image = isinstance(ch, PhraseImage)
+            desired_tags, desired_link_url = ([], None) if is_image else tags_at(pos)
 
             while open_stack and open_stack[-1] not in desired_tags:
                 closing = open_stack.pop()
@@ -607,10 +852,13 @@ class RichTextEditor(ttk.Frame):
                 if tag == TAG_LINK:
                     open_link_url = desired_link_url
 
-            if ch == "\n":
+            if is_image:
+                out.append(ch.to_html())
+            elif ch == "\n":
                 out.append("<br>")
             else:
-                out.append(_escape_html(ch))
+                # Quotes only need escaping in attributes such as href above.
+                out.append(html_module.escape(ch, quote=False))
 
         while open_stack:
             out.append(close_tag(open_stack.pop()))
@@ -624,7 +872,7 @@ class RichTextEditor(ttk.Frame):
         class _ImportParser(HTMLParser):
             def __init__(self):
                 super().__init__(convert_charrefs=True)
-                self.chunks = []  # list[(text, tags, link_url)]
+                self.chunks = []  # list[(text_or_image, tags, link_url)]
                 self.active_tags = []
                 self.active_link = None
 
@@ -638,6 +886,9 @@ class RichTextEditor(ttk.Frame):
                 if not self.chunks:
                     return
                 last_text, last_tags, last_link = self.chunks[-1]
+                if isinstance(last_text, PhraseImage):
+                    self._append_text("\n")
+                    return
                 if last_text.endswith("\n"):
                     return
                 self.chunks[-1] = (last_text + "\n", last_tags, last_link)
@@ -664,6 +915,11 @@ class RichTextEditor(ttk.Frame):
                     self.active_link = href
                 elif t == "br":
                     self._append_text("\n")
+                elif t == "img":
+                    image_attrs = dict(attrs)
+                    image = PhraseImage.from_html_src(image_attrs.get("src") or "", image_attrs.get(PREVIEW_SIZE_ATTR))
+                    if image:
+                        self.chunks.append((image, (), None))
                 elif t == "li":
                     self._append_text("• ")
 
@@ -700,16 +956,25 @@ class RichTextEditor(ttk.Frame):
             parser.chunks.pop()
         if parser.chunks:
             t, tg, lk = parser.chunks[-1]
-            parser.chunks[-1] = (t.rstrip("\n"), tg, lk)
+            if isinstance(t, str):
+                parser.chunks[-1] = (t.rstrip("\n"), tg, lk)
 
         prev_state = self._text.cget("state")
         if prev_state == tk.DISABLED:
             self._text.configure(state=tk.NORMAL)
+        self._selected_image = None
+        if self._image_gesture and self._image_gesture.resize_source is not None:
+            self._image_gesture.resize_source.close()
+        self._image_gesture = None
         self._text.delete("1.0", tk.END)
+        self._images.clear()
         for text, tags, link_url in parser.chunks:
             if not text:
                 continue
             start = self._text.index("end-1c")
+            if isinstance(text, PhraseImage):
+                self._insert_image(start, text)
+                continue
             self._text.insert("end", text)
             end = self._text.index("end-1c")
             if self._text.compare(start, ">=", end):
@@ -719,6 +984,7 @@ class RichTextEditor(ttk.Frame):
             if TAG_LINK in tags and link_url:
                 self._text.tag_add("link_%s" % _escape_html(link_url), start, end)
         self._refresh_derived_tags()
+        self._text.edit_reset()
         if prev_state == tk.DISABLED:
             self._text.configure(state=tk.DISABLED)
 

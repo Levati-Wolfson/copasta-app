@@ -1,12 +1,14 @@
 """Rich text paste: save clipboard, set HTML + plain text, Ctrl+V, restore. Uses Windows CF_HTML."""
-import re
 import time
 import threading
 import logging
 import ctypes
+from html.parser import HTMLParser
 
 import win32clipboard
 from pynput.keyboard import Controller, Key
+
+from phrase_images import PhraseImage, strip_preview_sizes
 
 CF_HTML = None
 
@@ -27,7 +29,7 @@ def _ensure_shift_released_before_ctrl_v():
     """
     Triggers that end with Shift (capital letters, !, etc.) often leave Shift
     down briefly. Many apps map Ctrl+Shift+V to 'paste without formatting',
-    so a plain Ctrl+V paste becomes plain text and loses line breaks / HTML.
+    so a plain Ctrl+V paste can lose formatting.
     Wait for Shift to go up, then synthesize Shift release if still down.
     """
     deadline = time.perf_counter() + 0.5
@@ -57,7 +59,7 @@ def _build_cf_html_content(html_fragment):
     body = (
         "<html><head><meta charset='utf-8'></head>"
         "<body><!--StartFragment-->%s<!--EndFragment--></body></html>"
-    ) % (html_fragment or "")
+    ) % strip_preview_sizes(html_fragment or "")
     header_tpl = (
         "Version:0.9\r\nStartHTML:%09d\r\nEndHTML:%09d\r\n"
         "StartFragment:%09d\r\nEndFragment:%09d\r\n\r\n"
@@ -84,35 +86,113 @@ def _open_clipboard():
     return False
 
 
+class _PlainTextParser(HTMLParser):
+    """Extract visible text and line breaks from a phrase's HTML."""
+
+    _BLOCK_TAGS = {"p", "div", "li", "ul", "ol", "blockquote", "pre",
+                   "h1", "h2", "h3", "h4", "h5", "h6", "tr"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.image_sources = []
+        self._block_break_pending = False
+        self._ignored_tag = None
+
+    def _append(self, text):
+        if self._block_break_pending:
+            if self.parts and not self.parts[-1].endswith("\n"):
+                self.parts.append("\n")
+            self._block_break_pending = False
+        self.parts.append(text)
+
+    def handle_starttag(self, tag, attrs):
+        if self._ignored_tag:
+            return
+        if tag in ("script", "style"):
+            self._ignored_tag = tag
+        elif tag == "br":
+            self._append("\n")
+        elif tag == "img":
+            self.image_sources.append(dict(attrs).get("src") or "")
+        elif tag in self._BLOCK_TAGS:
+            self._block_break_pending = True
+
+    def handle_endtag(self, tag):
+        if self._ignored_tag:
+            if tag == self._ignored_tag:
+                self._ignored_tag = None
+        elif tag in self._BLOCK_TAGS:
+            self._block_break_pending = True
+
+    def handle_data(self, text):
+        if self._ignored_tag or not text:
+            return
+        if self._block_break_pending and not text.strip(" \t\r\n"):
+            return  # Ignore indentation between HTML blocks.
+        self._append(text.replace("\r\n", "\n").replace("\r", "\n"))
+
+
+def _parse_phrase_html(html):
+    parser = _PlainTextParser()
+    parser.feed(html)
+    parser.close()
+    return "".join(parser.parts), parser.image_sources
+
+
 def html_to_plain(html):
-    """Strip tags for plain-text fallback."""
-    text = re.sub(r"<[^>]+>", "", html)
-    text = text.replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
-    return text.strip()
+    """Return Unicode text with entities decoded once and line breaks intact."""
+    text, _ = _parse_phrase_html(html)
+    return text
+
+
+def _write_open_clipboard(html_fragment):
+    text, images = _parse_phrase_html(html_fragment)
+    win32clipboard.EmptyClipboard()
+    win32clipboard.SetClipboardText(text.replace("\n", "\r\n"), win32clipboard.CF_UNICODETEXT)
+    try:
+        win32clipboard.SetClipboardData(_get_cf_html(), _build_cf_html_content(html_fragment))
+    except Exception:
+        logging.exception("Failed setting clipboard HTML format.")
+    # Offering a standalone bitmap for a mixed phrase could cause an editor to
+    # pick that bitmap and drop the surrounding text. Use HTML for mixed phrases.
+    if len(images) == 1 and not text.strip():
+        try:
+            image = PhraseImage.from_html_src(images[0])
+            if image:
+                win32clipboard.SetClipboardData(win32clipboard.CF_DIB, image.to_dib())
+        except Exception:
+            logging.exception("Failed setting clipboard image format.")
+
+
+def _read_open_clipboard():
+    saved = {}
+    try:
+        saved["text"] = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+    except Exception:
+        pass
+    try:
+        saved["html"] = win32clipboard.GetClipboardData(_get_cf_html())
+    except TypeError:
+        pass
+    except Exception:
+        logging.exception("Failed reading clipboard HTML.")
+    try:
+        if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_DIB):
+            saved["dib"] = win32clipboard.GetClipboardData(win32clipboard.CF_DIB)
+    except Exception:
+        logging.exception("Failed reading clipboard image.")
+    return saved
 
 
 def save_clipboard():
-    """Save current clipboard. Returns dict with keys 'text' and 'html' (optional)."""
-    saved = {}
+    """Save current clipboard text, HTML, and bitmap when available."""
     if not _open_clipboard():
-        return saved
+        return {}
     try:
-        try:
-            saved["text"] = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
-        except Exception:
-            saved["text"] = ""
-        try:
-            html = win32clipboard.GetClipboardData(_get_cf_html())
-            if isinstance(html, bytes):
-                html = html.decode("utf-8", errors="replace")
-            saved["html"] = html
-        except TypeError:
-            pass
-        except Exception:
-            logging.exception("save_clipboard: failed reading HTML.")
+        return _read_open_clipboard()
     finally:
         win32clipboard.CloseClipboard()
-    return saved
 
 
 def restore_clipboard(saved):
@@ -124,7 +204,10 @@ def restore_clipboard(saved):
         if saved.get("text") is not None:
             win32clipboard.SetClipboardText(saved["text"], win32clipboard.CF_UNICODETEXT)
         if saved.get("html"):
-            win32clipboard.SetClipboardData(_get_cf_html(), saved["html"].encode("utf-8"))
+            html = saved["html"]
+            win32clipboard.SetClipboardData(_get_cf_html(), html.encode("utf-8") if isinstance(html, str) else html)
+        if saved.get("dib"):
+            win32clipboard.SetClipboardData(win32clipboard.CF_DIB, saved["dib"])
     finally:
         win32clipboard.CloseClipboard()
 
@@ -134,12 +217,7 @@ def set_clipboard_html(html_fragment):
     if not _open_clipboard():
         return False
     try:
-        win32clipboard.EmptyClipboard()
-        win32clipboard.SetClipboardText(html_to_plain(html_fragment), win32clipboard.CF_UNICODETEXT)
-        try:
-            win32clipboard.SetClipboardData(_get_cf_html(), _build_cf_html_content(html_fragment))
-        except Exception:
-            logging.exception("set_clipboard_html: failed setting HTML format.")
+        _write_open_clipboard(html_fragment)
         return True
     except Exception:
         logging.exception("set_clipboard_html: failed.")
@@ -177,28 +255,9 @@ def save_and_set_clipboard_html(html_fragment):
     if not _open_clipboard():
         return saved, False
     try:
-        # ── save ──────────────────────────────────────────────────────────
+        saved = _read_open_clipboard()
         try:
-            saved["text"] = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
-        except Exception:
-            saved["text"] = ""
-        try:
-            raw = win32clipboard.GetClipboardData(_get_cf_html())
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8", errors="replace")
-            saved["html"] = raw
-        except TypeError:
-            pass
-        except Exception:
-            logging.exception("save_and_set: failed reading HTML.")
-        # ── set ───────────────────────────────────────────────────────────
-        try:
-            win32clipboard.EmptyClipboard()
-            win32clipboard.SetClipboardText(html_to_plain(html_fragment), win32clipboard.CF_UNICODETEXT)
-            try:
-                win32clipboard.SetClipboardData(_get_cf_html(), _build_cf_html_content(html_fragment))
-            except Exception:
-                logging.exception("save_and_set: HTML format failed; plain text set.")
+            _write_open_clipboard(html_fragment)
             html_ok = True
         except Exception:
             logging.exception("save_and_set: failed setting clipboard data.")

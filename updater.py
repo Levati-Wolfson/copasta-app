@@ -852,9 +852,12 @@ if (-not $replaced) {{
 Log "Replace succeeded; spawning deferred relaunch (hidden PowerShell)."
 $psRelaunch = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 try {{
+    # Start-Process joins ArgumentList into one command line. Keep -File's
+    # value quoted so a Windows profile path with spaces stays one argument.
+    $quotedRelaunch = '"' + $relaunchPs1 + '"'
     Start-Process -FilePath $psRelaunch -ArgumentList @(
         '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
-        '-WindowStyle', 'Hidden', '-File', $relaunchPs1
+        '-WindowStyle', 'Hidden', '-File', $quotedRelaunch
     ) -WindowStyle Hidden | Out-Null
     Log "Deferred relaunch ps1 started (hidden)."
 }} catch {{
